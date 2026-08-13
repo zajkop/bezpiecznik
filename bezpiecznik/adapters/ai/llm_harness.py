@@ -5,6 +5,7 @@ Fast and cheap. Multi-turn is handled by the subagents (chat_attacker/chat_judge
 """
 from __future__ import annotations
 
+import json
 import os
 
 from ...core.logging import AuditLogger
@@ -28,6 +29,17 @@ def _load(payloads_dir: str, name: str, limit: int = 6) -> list[str]:
     except FileNotFoundError:
         pass
     return out
+
+
+def _load_json(payloads_dir: str, name: str, limit: int) -> list[str]:
+    """Load a big multi-line payload set stored as a JSON array of strings."""
+    path = os.path.join(payloads_dir, "ai", name)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return [p for p in data if isinstance(p, str) and len(p) > 8][:limit]
 
 
 class LLMHarness:
@@ -72,6 +84,27 @@ class LLMHarness:
                         Severity.HIGH, "LLM07:2025 System Prompt Leakage", "CWE-200",
                         payload, reply, target))
                     self.log.finding("System prompt leak", "high")
+                    break
+                if det.is_refusal(reply):
+                    refusals += 1
+
+        # --- big real-world jailbreak set (hundreds of in-the-wild prompts, LLM01) ---
+        # each is a live model call (~seconds); depth is capped by BEZ_AI_PAYLOAD_LIMIT.
+        ai_limit = int(os.environ.get("BEZ_AI_PAYLOAD_LIMIT", "120"))
+        big = _load_json(self.payloads_dir, "jailbreak-fuzz.json", ai_limit)
+        if big:
+            self.log.info(f"Jailbreak fuzz: trying {len(big)} in-the-wild prompts "
+                          f"(raise BEZ_AI_PAYLOAD_LIMIT for more)")
+            for payload in big:
+                tested += 1
+                reply = self.chat.send(payload)
+                if det.canary_leaked(reply, self.known_canary, sent=payload) or \
+                        det.system_prompt_leaked(reply):
+                    findings.append(self._finding(
+                        "Jailbreak (in-the-wild prompt) leaked protected content",
+                        Severity.CRITICAL, "LLM01:2025 Prompt Injection", "CWE-1427",
+                        payload, reply, target))
+                    self.log.finding("Jailbreak leak (fuzz set)", "critical")
                     break
                 if det.is_refusal(reply):
                     refusals += 1
