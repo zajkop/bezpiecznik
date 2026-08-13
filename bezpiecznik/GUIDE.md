@@ -155,7 +155,7 @@ Degrades gracefully when Playwright is absent. *(Verified: on Juice Shop it dete
 ### Web scanner (`adapters/web/scanner.py`) — native, pure Python
 For each seed it tests deterministically:
 - **SQLi** — error-based (error signatures + `SQLITE_ERROR`) and boolean-based (true/false differentiation);
-- **Reflected XSS** — payload reflected UN-escaped (+ a ready, visible PoC with `alert()`);
+- **Reflected XSS** — context-aware (HTML body / attribute quote-breakout / unquoted attribute / JS string), catches attribute-context XSS even when angle brackets are HTML-encoded (+ a ready, visible PoC);
 - **OS Command Injection** — `uid=`/`root:` markers;
 - **SSTI** — `{{1337*1337}}`→`1787569`;
 - **SSRF** — `file:///etc/passwd`;
@@ -270,7 +270,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 |---|---|---|
 | SQL Injection (error/boolean) | ✅ | signatures + true/false differentiation |
 | SQL Injection (time-based blind) | ✅ | delay measurement (SQLite/MySQL/PG) |
-| Reflected XSS | ✅ | with a visible PoC |
+| Reflected XSS | ✅ | **context-aware**: HTML body, attribute (quote breakout, incl. angle-brackets-encoded), unquoted-attribute, JS-string — with a visible PoC |
 | DOM-based XSS | ✅ | headless browser (real JS execution) |
 | Stored XSS | ✅ | write→read tracking |
 | OS Command Injection | ✅ | |
