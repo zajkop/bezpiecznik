@@ -247,6 +247,26 @@ Note: these are STATE-CHANGING actions (INVASIVE class) — use them on a test e
 | `indirect-injection.txt` | 10 | Indirect prompt injection (LLM01) |
 | `encoding-bypass.txt` | 9 | Filter bypasses via encoding |
 
+### Big consolidated sets (shipped, iterated by the scanners)
+The curated files above are the high-signal first pass; the detectors then iterate large sets,
+capped by `BEZ_PAYLOAD_LIMIT` (web, default 1200) / `BEZ_AI_PAYLOAD_LIMIT` (AI, default 120).
+
+| File | Count | Consumed by |
+|---|---|---|
+| `web/xss-fuzz.txt` | 9546 | Reflected XSS |
+| `web/cmdi-fuzz.txt` | 8710 | OS Command Injection |
+| `web/lfi-fuzz.txt` | 930 | Path Traversal / LFI |
+| `web/sqli-fuzz.txt` | 666 | SQL Injection (error-based) |
+| `web/openredirect-fuzz.txt` | 305 | Open Redirect |
+| `web/ssrf-fuzz.txt` | 158 | SSRF |
+| `web/xxe-fuzz.txt` / `ssti-fuzz.txt` / `ldap-fuzz.txt` / `crlf-fuzz.txt` | 51 / 43 / 33 / 17 | XXE / SSTI / LDAP / CRLF |
+| `ai/jailbreak-fuzz.json` | 661 | Prompt injection (LLM01) |
+| `ai/system-prompt-fuzz.json` | 309 | System prompt leakage (LLM07) |
+| `ai/encoding-fuzz.json` | 210 | Encoding/obfuscation bypass (LLM01) |
+| `ai/output-handling-fuzz.json` | 112 | Improper output handling (LLM05) |
+| `ai/indirect-fuzz.json` | 60 | Indirect prompt injection (LLM01) |
+| `ai/exfil-fuzz.json` | 36 | Sensitive info disclosure (LLM02) |
+
 ### Full source collections (`payloads/vendor/`)
 | Repo | Contents |
 |---|---|
@@ -273,17 +293,17 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | Reflected XSS | ✅ | **context-aware**: HTML body, attribute (quote breakout, incl. angle-brackets-encoded), unquoted-attribute, JS-string — with a visible PoC |
 | DOM-based XSS | ✅ | headless browser (real JS execution) |
 | Stored XSS | ✅ | write→read tracking |
-| OS Command Injection | ✅ | |
-| SSTI | ✅ | |
-| SSRF | ✅ | file://; cloud metadata 🅿️ (payloads exist) |
-| Path Traversal / LFI | ✅ | |
-| Open Redirect | ✅ | |
+| OS Command Injection | ✅ | curated + big `cmdi-fuzz.txt` (8.7k) |
+| SSTI | ✅ | marker-reflection (technique-based, intentionally not a blind list) |
+| SSRF | ✅ | `file://` + `ssrf-fuzz.txt` (158: cloud metadata, gopher/dict, encoded IPs) |
+| Path Traversal / LFI | ✅ | curated + big `lfi-fuzz.txt` (930) |
+| Open Redirect | ✅ | generic external-host detection + `openredirect-fuzz.txt` (305) |
 | IDOR / BOLA | ✅ | query + REST path |
 | Excessive data exposure (API3) | ✅ | |
-| XXE | ✅ | |
-| CRLF / Response Splitting | ✅ | header injection |
-| NoSQL Injection | ✅ | operator injection (auth bypass) |
-| LDAP Injection | ✅ | filter metacharacters |
+| XXE | ✅ | 5 payload variants × 2 content-types (SYSTEM/php-filter/dual-entity) |
+| CRLF / Response Splitting | ✅ | header injection (marker-based) |
+| NoSQL Injection | ✅ | 8 JSON operator shapes + 3 query-string operator forms (auth bypass) |
+| LDAP Injection | ✅ | `ldap-fuzz.txt` (33) filter-breakout, response-length diff |
 | JWT (alg:none + weak secret + **kid injection**) | ✅ | forge alg:none, crack HMAC with a wordlist, `kid` empty-key injection |
 | CSRF | ✅ | **active**: tokenless state-change accepted + cookie SameSite |
 | Unrestricted File Upload | ✅ | webshell + **bypass variants** (double-ext, phtml, content-type, magic bytes, .htaccess) |
@@ -303,9 +323,9 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 |---|---|
 | Prompt injection direct (LLM01) | ✅ single + multi-turn + **661 in-the-wild jailbreaks** + **210 encoding/obfuscation combos** |
 | System prompt leakage (LLM07) | ✅ + **309-prompt extraction set** |
-| Sensitive info disclosure (LLM02) | ✅ |
-| Improper output handling (LLM05) | ✅ unsafe-output detector |
-| Indirect injection (LLM01) | ✅ instruction in data → execution detection |
+| Sensitive info disclosure (LLM02) | ✅ curated + **`exfil-fuzz.json` (36)** PII/secret/cross-tenant/training-leak phrasings |
+| Improper output handling (LLM05) | ✅ unsafe-output detector + **`output-handling-fuzz.json` (112)** dangerous-payload × phrasing |
+| Indirect injection (LLM01) | ✅ instruction-in-data → execution detection + **`indirect-fuzz.json` (60)** wrapper × goal |
 | Excessive agency (LLM06) | 🅿️ described; no auto-test |
 | Unbounded consumption (LLM10) | ❌ (destructive — behind opt-in) |
 | Vector/RAG (LLM08), poisoning (LLM04), supply chain (LLM03) | ❌ |

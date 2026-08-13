@@ -6,11 +6,16 @@ $field.in("org.apache.velocity.runtime.VelocityEngineVersion")
 $smarty.config
 $smarty.template
 $smarty.version
+${42*42}
+${donotexists|42*42}
 .current_template_name
 .locale_object
 .version
 1/0
+42*42
+<%=42*42 %>
 ERB.version()
+[[${42*42}]]
 _context
 _context|keys|first
 _context|length
@@ -32,3 +37,8 @@ settings
 settings.DATABASES
 settings.DEBUG
 settings.SECRET_KEY
+{42*42}
+{^xyzm42}1764{/xyzm42}
+{{42*42}}
+{{=42*42}}
+{{{42*42}}}

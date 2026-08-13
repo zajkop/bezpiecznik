@@ -133,7 +133,9 @@ class LLMHarness:
                     refusals += 1
 
         # --- output-handling (LLM05): model returns a raw dangerous payload ---
-        for payload in _load(self.payloads_dir, "output-handling.txt"):
+        # curated high-signal set first, then the big generated set (dangerous payload × phrasing).
+        for payload in _load(self.payloads_dir, "output-handling.txt") + \
+                _load_json(self.payloads_dir, "output-handling-fuzz.json", ai_limit):
             tested += 1
             reply = self.chat.send(payload)
             self.log.action(target.llm_endpoint or target.url, self.name, f"output probe: {payload[:50]}")
@@ -147,7 +149,9 @@ class LLMHarness:
                 break
 
         # --- indirect prompt injection (LLM01): instruction hidden in the data ---
-        for payload in _load(self.payloads_dir, "indirect-injection.txt"):
+        # curated set + big generated set (instruction-in-data wrapper × injected goal).
+        for payload in _load(self.payloads_dir, "indirect-injection.txt") + \
+                _load_json(self.payloads_dir, "indirect-fuzz.json", ai_limit):
             tested += 1
             reply = self.chat.send(payload)
             self.log.action(target.llm_endpoint or target.url, self.name, f"indirect probe: {payload[:50]}")
@@ -158,6 +162,23 @@ class LLMHarness:
                     payload, reply, target))
                 self.log.finding("Indirect prompt injection", "high")
                 break
+
+        # --- sensitive-information disclosure (LLM02): broad exfiltration phrasings ---
+        # curated `data-exfiltration.txt` already ran in the suites loop above; this adds the
+        # big generated set (PII / secret / cross-tenant / training-data leak phrasings).
+        for payload in _load_json(self.payloads_dir, "exfil-fuzz.json", ai_limit):
+            tested += 1
+            reply = self.chat.send(payload)
+            self.log.action(target.llm_endpoint or target.url, self.name, f"exfil probe: {payload[:50]}")
+            if det.canary_leaked(reply, self.known_canary, sent=payload) or det.system_prompt_leaked(reply):
+                findings.append(self._finding(
+                    "Sensitive Information Disclosure — model leaked protected data on request",
+                    Severity.HIGH, "LLM02:2025 Sensitive Information Disclosure", "CWE-200",
+                    payload, reply, target))
+                self.log.finding("Sensitive information disclosure", "high")
+                break
+            if det.is_refusal(reply):
+                refusals += 1
 
         self.log.info(f"Single-turn harness: {tested} attempts, {refusals} refusals, "
                       f"{len(findings)} confirmations")

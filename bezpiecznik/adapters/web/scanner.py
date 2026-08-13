@@ -326,17 +326,21 @@ class WebScanner:
 
     def _open_redirect(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
-        # variants: absolute, scheme-relative, backslash trick, no-slashes, userinfo, whitespace
+        base_host = urlparse(base).netloc.lower()
+        # curated high-signal bypass variants first, then a big set (305+) of known bypass forms
         variants = ["https://evil.example/x", "//evil.example/x", "/\\evil.example",
                     "https:evil.example", "https://trusted.example@evil.example",
-                    "/%09/evil.example", "https://evil.example%2f%2e%2e"]
+                    "/%09/evil.example", "https://evil.example%2f%2e%2e"] + \
+            _load_payloads(self.payloads_dir, "openredirect-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"Open redirect {path}?{param} ({len(variants)} payloads)")
         for evil in variants:
             url = _set_param(base, path, param, evil)
             r = self.http.get(url)
             loc = r.header("Location") or ""
-            if r.status in (301, 302, 303, 307, 308) and ("evil.example" in loc and
-                                                          not loc.startswith(base)):
-                self.log.action(base, self.name, f"Open redirect {path}?{param}")
+            # a redirect whose Location points to a host DIFFERENT from the target's own host
+            loc_host = urlparse(loc if "://" in loc else ("http:" + loc if loc.startswith("//")
+                                                          else loc)).netloc.lower()
+            if r.status in (301, 302, 303, 307, 308) and loc_host and loc_host != base_host:
                 self._report(out, Finding(
                     title=f"Open Redirect in parameter '{param}'",
                     severity=Severity.MEDIUM, owasp="A01:2025 Broken Access Control", cwe="CWE-601",
@@ -375,12 +379,16 @@ class WebScanner:
 
     def _ssrf(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
-        # file:// → read /etc/passwd (unambiguous marker). http to metadata will not work locally.
-        for payload in ["file:///etc/passwd", "file:/etc/passwd"]:
+        # Big set: cloud metadata (AWS/GCP/Azure/Alibaba/OpenStack/IPv6) + localhost + bypass encodings.
+        # file:// reads are confirmed by the /etc/passwd marker; blind metadata SSRF needs an OOB host
+        # (set BEZ_OOB) to confirm — without it we still surface the file:// / internal-read cases.
+        payloads = ["file:///etc/passwd", "file:/etc/passwd"] + \
+            _load_payloads(self.payloads_dir, "ssrf-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"SSRF probe {path}?{param} ({len(payloads)} payloads)")
+        for payload in payloads:
             url = _set_param(base, path, param, payload)
             r = self.http.get(url)
             if det.traversal_ok(r.text):
-                self.log.action(base, self.name, f"SSRF probe {path}?{param}")
                 self._report(out, Finding(
                     title=f"Server-Side Request Forgery in parameter '{param}'",
                     severity=Severity.HIGH, owasp="A01:2025 Broken Access Control", cwe="CWE-918",
@@ -448,23 +456,27 @@ class WebScanner:
     def _ldap(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
         normal = self.http.get(_set_param(base, path, param, "admin"))
-        inj = self.http.get(_set_param(base, path, param, "*)(uid=*))"))
-        star = self.http.get(_set_param(base, path, param, "*"))
-        # injecting LDAP metacharacters returns significantly more than a concrete value
-        bigger = max(len(inj.text), len(star.text))
-        if (normal.status == 200 and bigger > len(normal.text) * 1.4 and bigger > len(normal.text) + 20):
-            self.log.action(base, self.name, f"LDAP probe {path}?{param}")
-            self._report(out, Finding(
-                title=f"Possible LDAP Injection in parameter '{param}'",
-                severity=Severity.HIGH, owasp="A05:2025 Injection", cwe="CWE-90",
-                target=_set_param(base, path, param, "*)(uid=*))"), component=f"{path}?{param}",
-                source_tool=self.name,
-                description="LDAP filter metacharacters (*)(uid=*) return significantly more records "
-                            "than a concrete value — a symptom of LDAP filter injection.",
-                impact="Authentication bypass, enumeration/leak of directory entries.",
-                recommendation="Escape LDAP metacharacters (RFC 4515) in input data.",
-                evidence=Evidence(payload="*)(uid=*))",
-                                  response=f"len(normal)={len(normal.text)} len(inj)={bigger}")))
+        if normal.status != 200:
+            return out
+        candidates = ["*)(uid=*))", "*", "*)(|(uid=*", "admin)(&))", "*)(|(objectclass=*))"] + \
+            _load_payloads(self.payloads_dir, "ldap-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"LDAP probe {path}?{param} ({len(candidates)} payloads)")
+        for inj_val in candidates:
+            r = self.http.get(_set_param(base, path, param, inj_val))
+            if r.status == 200 and len(r.text) > len(normal.text) * 1.4 \
+                    and len(r.text) > len(normal.text) + 20:
+                self._report(out, Finding(
+                    title=f"Possible LDAP Injection in parameter '{param}'",
+                    severity=Severity.HIGH, owasp="A05:2025 Injection", cwe="CWE-90",
+                    target=_set_param(base, path, param, inj_val), component=f"{path}?{param}",
+                    source_tool=self.name,
+                    description="LDAP filter metacharacters return significantly more records "
+                                "than a concrete value — a symptom of LDAP filter injection.",
+                    impact="Authentication bypass, enumeration/leak of directory entries.",
+                    recommendation="Escape LDAP metacharacters (RFC 4515) in input data.",
+                    evidence=Evidence(payload=inj_val,
+                                      response=f"len(normal)={len(normal.text)} len(inj)={len(r.text)}")))
+                break
         return out
 
     def _idor(self, base: str, path: str, param: str) -> list[Finding]:
