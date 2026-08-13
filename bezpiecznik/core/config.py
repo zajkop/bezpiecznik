@@ -52,6 +52,9 @@ class HTTPConfig:
     verify_tls: bool = _env_bool("BEZ_VERIFY_TLS", True)
     # OOB endpoint (Burp Collaborator / interactsh) for confirming blind vulnerabilities
     oob_domain: str = _env("BEZ_OOB", "")
+    # how many payloads per detector to try from the big consolidated sets (raise for deeper,
+    # slower scans — the scanner early-exits on the first confirmed hit anyway)
+    payload_limit: int = int(_env("BEZ_PAYLOAD_LIMIT", "1200"))
 
 
 @dataclass
