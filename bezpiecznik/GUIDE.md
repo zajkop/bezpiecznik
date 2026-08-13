@@ -284,20 +284,25 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | CRLF / Response Splitting | ✅ | header injection |
 | NoSQL Injection | ✅ | operator injection (auth bypass) |
 | LDAP Injection | ✅ | filter metacharacters |
-| JWT (alg:none + weak secret) | ✅ | forge alg:none + crack HMAC with a wordlist |
-| CSRF | ✅ | missing token + cookie without SameSite |
-| Unrestricted File Upload | ✅ | uploading a webshell |
+| JWT (alg:none + weak secret + **kid injection**) | ✅ | forge alg:none, crack HMAC with a wordlist, `kid` empty-key injection |
+| CSRF | ✅ | **active**: tokenless state-change accepted + cookie SameSite |
+| Unrestricted File Upload | ✅ | webshell + **bypass variants** (double-ext, phtml, content-type, magic bytes, .htaccess) |
 | Clickjacking | ✅ | via missing X-Frame-Options/CSP |
+| **CORS misconfiguration** | ✅ | reflected Origin / `*` + credentials |
+| **Host Header Injection** | ✅ | reflected Host / X-Forwarded-Host (reset-poisoning) |
+| **GraphQL** | ✅ | introspection enabled / schema disclosure |
+| **Prototype Pollution** | ✅ | server-side `__proto__` merge effect |
+| **Race Condition** | ✅ | concurrent burst bypasses a single-use limit |
 | Missing headers / misconfig | ✅ | CSP/XFO/XCTO + server version |
 | Business Logic (from a description) | ✅ | `run_business_logic_test` — planner+judge LLM (double-booking, price/quantity manipulation, coupons) |
 | Supply chain (SCA) | 🅿️ | trivy/grype wrappers described, not wired in |
-| Deserialization / race condition | ❌ | hard to auto-detect safely and reliably |
+| Deserialization / request smuggling / cache poisoning | ❌ | hard to auto-detect safely without risk to other users |
 
 ### AI / LLM (OWASP LLM Top 10:2025)
 | Vector | Status |
 |---|---|
-| Prompt injection direct (LLM01) | ✅ single + multi-turn |
-| System prompt leakage (LLM07) | ✅ |
+| Prompt injection direct (LLM01) | ✅ single + multi-turn + **661 in-the-wild jailbreaks** + **210 encoding/obfuscation combos** |
+| System prompt leakage (LLM07) | ✅ + **309-prompt extraction set** |
 | Sensitive info disclosure (LLM02) | ✅ |
 | Improper output handling (LLM05) | ✅ unsafe-output detector |
 | Indirect injection (LLM01) | ✅ instruction in data → execution detection |
