@@ -313,6 +313,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | **GraphQL** | ✅ | introspection enabled / schema disclosure |
 | **Prototype Pollution** | ✅ | server-side `__proto__` merge effect |
 | **Race Condition** | ✅ | concurrent burst bypasses a single-use limit |
+| Verbose error / stack-trace disclosure | ✅ | malformed input leaks a traceback/debug page (Python/Java/.NET/PHP/Node/Ruby/Go); baseline-gated, distinct from SQL errors (CWE-209) |
 | Missing headers / misconfig | ✅ | CSP/XFO/XCTO + server version |
 | Business Logic (from a description) | ✅ | `run_business_logic_test` — planner+judge LLM (double-booking, price/quantity manipulation, coupons) |
 | Supply chain (SCA) | 🅿️ | trivy/grype wrappers described, not wired in |

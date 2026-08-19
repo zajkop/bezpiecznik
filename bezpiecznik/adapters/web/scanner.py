@@ -73,6 +73,7 @@ class WebScanner:
             findings += self._traversal(base, path, param)
             findings += self._ssti(base, path, param)
             findings += self._crlf(base, path, param)
+            findings += self._error_disclosure(base, path, param)
             findings += self._time_sqli(base, path, param)
             if param.lower() in {"url", "uri", "fetch", "link", "src", "dest", "u",
                                  "target", "feed", "callback", "path", "next", "return", "redirect"}:
@@ -171,6 +172,44 @@ class WebScanner:
                 evidence=Evidence(payload="1 OR 1=1 / 1 AND 1=2",
                                   response=f"len(true)={len(r_true.text)} len(false)={len(r_false.text)} "
                                            f"len(base)={len(r_base.text)}")))
+        return out
+
+    def _error_disclosure(self, base: str, path: str, param: str) -> list[Finding]:
+        """Verbose error / stack-trace disclosure (OWASP 2026 'Mishandling of
+        Exceptional Conditions'; CWE-209/CWE-550). Sends inputs that commonly break
+        naive parsing/handling and reports only when a malformed request leaks a
+        stack trace/debug page that a normal baseline request does NOT — keeping
+        false positives low and distinct from injection findings."""
+        out: list[Finding] = []
+        # Baseline (benign value): if it already leaks a trace, this is not
+        # input-triggered — skip to avoid a noisy/false signal.
+        base_resp = self._baseline(base, path, param)
+        if det.error_disclosure(base_resp.text):
+            return out
+        # Inputs that frequently trip unhandled exceptions: type confusion (array),
+        # oversized int, null byte, malformed unicode/format, and a nested bracket.
+        probes = ["[]", "9" * 40, "%00", "￾", "%", "{{", "\x00\x01", "a[b][c]"]
+        self.log.action(base, self.name, f"Error-disclosure probe {path}?{param} ({len(probes)} inputs)")
+        for probe in probes:
+            url = _set_param(base, path, param, probe)
+            r = self.http.get(url)
+            sig = det.error_disclosure(r.text)
+            # Not a SQL error (that is the injection detector's job) — keep classes distinct.
+            if sig and det.sql_error(r.text) is None:
+                self._report(out, Finding(
+                    title=f"Verbose error / stack-trace disclosure in parameter '{param}'",
+                    severity=Severity.MEDIUM,
+                    owasp="A05:2025 Security Misconfiguration", cwe="CWE-209",
+                    target=url, component=f"{path}?{param}", source_tool=self.name,
+                    description=f"A malformed value (`{probe}`) makes the application return an "
+                                f"unhandled exception / debug stack trace (signature: {sig}).",
+                    impact="Leaks framework, versions, file paths and internal logic — aids "
+                           "further attacks; debug pages may allow code execution.",
+                    recommendation="Handle exceptional conditions; return generic errors and "
+                                   "disable debug mode in production.",
+                    reproduction=f"GET {url} → response body contains a stack trace.",
+                    evidence=Evidence(payload=probe, request=f"GET {url}", response=r.text[:400])))
+                return out  # one confirmed leak per parameter is enough
         return out
 
     def _xss(self, base: str, path: str, param: str) -> list[Finding]:

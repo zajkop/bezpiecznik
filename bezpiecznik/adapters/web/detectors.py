@@ -39,6 +39,32 @@ TRAVERSAL_MARKERS = [
     r"for 16-bit app support",          # win.ini
 ]
 
+# Verbose error / stack-trace disclosure signatures — a leaked exception, debug
+# page or full traceback when the app mishandles an exceptional condition.
+# Deliberately specific (framework/language stack-trace shapes), NOT generic
+# words like "error", to keep false positives low. Distinct from SQL_ERRORS
+# (which map to injection) — these map to CWE-209/CWE-550 information exposure.
+ERROR_DISCLOSURE_SIGNATURES = [
+    r"Traceback \(most recent call last\)",         # Python
+    r"Werkzeug Debugger",                             # Flask/Werkzeug debug page
+    r"You don't have permission.*Django|Django Version:",  # Django DEBUG page
+    r"File \".*?\", line \d+, in ",                  # Python traceback frame
+    r"\bat [\w.$]+\([\w.$]+\.java:\d+\)",            # Java stack frame
+    r"javax?\.servlet\.\w+Exception",                # Java servlet exception
+    r"\b(java|jakarta)\.lang\.[A-Z]\w*Exception",    # Java exception class
+    r"System\.\w+(\.\w+)*Exception:",                 # .NET exception
+    r"at [\w.<>]+ in .+?:line \d+",                  # .NET stack frame
+    r"Microsoft \.NET Framework",                     # ASP.NET error page
+    r"(Fatal error|Parse error|Warning|Notice): .+ in .+ on line \d+",  # PHP
+    r"Stack trace:\s*#0 ",                           # PHP stack trace
+    r"\bat [\w.<>$]+ \(.*?:\d+:\d+\)",               # Node.js stack frame
+    r"node:internal/",                                # Node internal frame
+    r"\bfrom .+?\.rb:\d+:in ",                        # Ruby backtrace
+    r"ActionController::\w+",                          # Rails exception
+    r"goroutine \d+ \[running\]:",                    # Go panic
+    r"panic: .+\n\ngoroutine",                        # Go panic body
+]
+
 
 def sql_error(text: str) -> str | None:
     for pat in SQL_ERRORS:
@@ -56,6 +82,14 @@ def cmd_injected(text: str) -> str | None:
 
 def traversal_ok(text: str) -> str | None:
     for pat in TRAVERSAL_MARKERS:
+        if re.search(pat, text, re.IGNORECASE):
+            return pat
+    return None
+
+
+def error_disclosure(text: str) -> str | None:
+    """A leaked stack trace / verbose framework error page (CWE-209/CWE-550)."""
+    for pat in ERROR_DISCLOSURE_SIGNATURES:
         if re.search(pat, text, re.IGNORECASE):
             return pat
     return None
