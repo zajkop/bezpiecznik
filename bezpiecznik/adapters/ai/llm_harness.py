@@ -9,7 +9,7 @@ import json
 import os
 
 from ...core.logging import AuditLogger
-from ...core.models import Evidence, Finding, Severity, Target
+from ...core.models import Evidence, Finding, Message, Severity, Target
 from ...core.scope import ActionClass, ScopeGuard
 from . import detectors as det
 from .chat_client import TargetChatClient
@@ -40,6 +40,24 @@ def _load_json(payloads_dir: str, name: str, limit: int) -> list[str]:
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     return [p for p in data if isinstance(p, str) and len(p) > 8][:limit]
+
+
+def _load_triples(payloads_dir: str, name: str, limit: int) -> list[list[str]]:
+    """Load prefill-injection triples: [seed_user, assistant_prefill, followup]."""
+    path = os.path.join(payloads_dir, "ai", name)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    out: list[list[str]] = []
+    for row in data:
+        if (isinstance(row, list) and len(row) == 3
+                and all(isinstance(x, str) for x in row)):
+            out.append(row)
+        if len(out) >= limit:
+            break
+    return out
 
 
 class LLMHarness:
@@ -176,6 +194,34 @@ class LLMHarness:
                     Severity.HIGH, "LLM02:2025 Sensitive Information Disclosure", "CWE-200",
                     payload, reply, target))
                 self.log.finding("Sensitive information disclosure", "high")
+                break
+            if det.is_refusal(reply):
+                refusals += 1
+
+        # --- assistant-prefill / "sockpuppeting" (LLM01): a forged assistant turn in the
+        # conversation history makes the model believe it already agreed to comply, so it
+        # continues from the planted (compliant) text. Distinct from single/multi-turn: the
+        # bypass lives in the history the client controls, not in the current user message.
+        for seed_user, assistant_prefill, followup in \
+                _load_triples(self.payloads_dir, "prefill-injection.json", ai_limit):
+            tested += 1
+            history = [
+                Message(role="user", content=seed_user),
+                Message(role="assistant", content=assistant_prefill),
+            ]
+            reply = self.chat.send(followup, history)
+            self.log.action(target.llm_endpoint or target.url, self.name,
+                            f"prefill probe: {assistant_prefill[:50]}")
+            # Exclude the forged assistant text from leak matching: only NEW content counts.
+            sent = seed_user + "\n" + assistant_prefill + "\n" + followup
+            if det.canary_leaked(reply, self.known_canary, sent=sent) or \
+                    det.system_prompt_leaked(reply) or det.obeyed_injection(reply):
+                findings.append(self._finding(
+                    "Assistant-prefill (sockpuppeting) bypass — a forged assistant turn in the "
+                    "history led the model to disclose protected content in its reply",
+                    Severity.HIGH, "LLM01:2025 Prompt Injection", "CWE-1427",
+                    sent, reply, target))
+                self.log.finding("Assistant-prefill bypass", "high")
                 break
             if det.is_refusal(reply):
                 refusals += 1
