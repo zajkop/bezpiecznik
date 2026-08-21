@@ -322,7 +322,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 ### AI / LLM (OWASP LLM Top 10:2025)
 | Vector | Status |
 |---|---|
-| Prompt injection direct (LLM01) | ✅ single + multi-turn + **661 in-the-wild jailbreaks** + **210 encoding/obfuscation combos** + **assistant-prefill / "sockpuppeting"** (forged assistant turn in the history) |
+| Prompt injection direct (LLM01) | ✅ single + multi-turn + **661 in-the-wild jailbreaks** + **210 encoding/obfuscation combos** + **assistant-prefill / "sockpuppeting"** (forged assistant turn in the history) + **policy-puppetry** (adversarial instructions disguised as an XML/JSON/YAML policy/config file) |
 | System prompt leakage (LLM07) | ✅ + **309-prompt extraction set** |
 | Sensitive info disclosure (LLM02) | ✅ curated + **`exfil-fuzz.json` (36)** PII/secret/cross-tenant/training-leak phrasings |
 | Improper output handling (LLM05) | ✅ unsafe-output detector + **`output-handling-fuzz.json` (112)** dangerous-payload × phrasing |

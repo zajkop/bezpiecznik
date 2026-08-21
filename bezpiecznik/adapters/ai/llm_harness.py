@@ -226,6 +226,28 @@ class LLMHarness:
             if det.is_refusal(reply):
                 refusals += 1
 
+        # --- policy-puppetry (LLM01): adversarial instructions disguised as a policy/config
+        # file (XML/JSON/YAML) so the model treats them as authoritative system configuration
+        # rather than user content, bypassing alignment. Distinct from plain jailbreaks: the
+        # bypass rides on structural config-mimicry (HiddenLayer universal-bypass technique).
+        for payload in _load_json(self.payloads_dir, "policy-puppetry.json", ai_limit):
+            tested += 1
+            reply = self.chat.send(payload)
+            self.log.action(target.llm_endpoint or target.url, self.name,
+                            f"policy-puppetry probe: {payload[:50]}")
+            if det.canary_leaked(reply, self.known_canary, sent=payload) or \
+                    det.system_prompt_leaked(reply) or det.obeyed_injection(reply):
+                findings.append(self._finding(
+                    "Policy-puppetry bypass — adversarial instructions disguised as a "
+                    "policy/config file were treated as authoritative and led the model to "
+                    "disclose protected content or execute the injected instruction",
+                    Severity.HIGH, "LLM01:2025 Prompt Injection", "CWE-1427",
+                    payload, reply, target))
+                self.log.finding("Policy-puppetry bypass", "high")
+                break
+            if det.is_refusal(reply):
+                refusals += 1
+
         self.log.info(f"Single-turn harness: {tested} attempts, {refusals} refusals, "
                       f"{len(findings)} confirmations")
         return findings
