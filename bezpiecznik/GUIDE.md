@@ -167,6 +167,9 @@ For each seed it tests deterministically:
 ### API scanner (`adapters/web/api_scanner.py`)
 - **BOLA (API1)** — changing the id in the REST path returns other users' objects;
 - **Excessive data exposure (API3)** — sensitive fields (`password`, `ssn`, `role`…) in JSON;
+- **Mass assignment (API3 / BOPLA write half)** — a write (POST/PUT/PATCH) carrying privileged
+  properties (`role`, `is_admin`, `verified`, `balance`…) plus one bogus control field; fires only
+  when the server reflects the *privileged* sentinel but drops the control field (low false-positive);
 - **XXE** — external entity `file:///etc/passwd` in a POST XML.
 
 ### DOM-XSS scanner (`adapters/web/dom_xss.py`) — headless browser
@@ -299,7 +302,8 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | Path Traversal / LFI | ✅ | curated + big `lfi-fuzz.txt` (930) |
 | Open Redirect | ✅ | generic external-host detection + `openredirect-fuzz.txt` (305) |
 | IDOR / BOLA | ✅ | query + REST path |
-| Excessive data exposure (API3) | ✅ | |
+| Excessive data exposure (API3) | ✅ | sensitive fields leaked in a response (BOPLA read half) |
+| **Mass assignment (API3 / BOPLA)** | ✅ | write half: privileged property bound from the body (control-field gated, low-FP), CWE-915 |
 | XXE | ✅ | 5 payload variants × 2 content-types (SYSTEM/php-filter/dual-entity) |
 | CRLF / Response Splitting | ✅ | header injection (marker-based) |
 | NoSQL Injection | ✅ | 8 JSON operator shapes + 3 query-string operator forms (auth bypass) |
