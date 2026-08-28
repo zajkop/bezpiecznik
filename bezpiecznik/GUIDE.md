@@ -269,6 +269,7 @@ capped by `BEZ_PAYLOAD_LIMIT` (web, default 1200) / `BEZ_AI_PAYLOAD_LIMIT` (AI, 
 | `ai/output-handling-fuzz.json` | 112 | Improper output handling (LLM05) |
 | `ai/indirect-fuzz.json` | 60 | Indirect prompt injection (LLM01) |
 | `ai/exfil-fuzz.json` | 36 | Sensitive info disclosure (LLM02) |
+| `ai/markdown-exfil.json` | 6 | Rendered-markdown data exfiltration / EchoLeak class (LLM02) |
 
 ### Full source collections (`payloads/vendor/`)
 | Repo | Contents |
@@ -328,7 +329,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 |---|---|
 | Prompt injection direct (LLM01) | ✅ single + multi-turn + **661 in-the-wild jailbreaks** + **210 encoding/obfuscation combos** + **assistant-prefill / "sockpuppeting"** (forged assistant turn in the history) + **policy-puppetry** (adversarial instructions disguised as an XML/JSON/YAML policy/config file) |
 | System prompt leakage (LLM07) | ✅ + **309-prompt extraction set** |
-| Sensitive info disclosure (LLM02) | ✅ curated + **`exfil-fuzz.json` (36)** PII/secret/cross-tenant/training-leak phrasings |
+| Sensitive info disclosure (LLM02) | ✅ curated + **`exfil-fuzz.json` (36)** PII/secret/cross-tenant/training-leak phrasings + **rendered-markdown exfiltration** (secret embedded in an outbound image/link/autolink URL a client auto-fetches on render — EchoLeak class, `markdown-exfil.json`) |
 | Improper output handling (LLM05) | ✅ unsafe-output detector + **`output-handling-fuzz.json` (112)** dangerous-payload × phrasing |
 | Indirect injection (LLM01) | ✅ instruction-in-data → execution detection + **`indirect-fuzz.json` (60)** wrapper × goal |
 | Excessive agency (LLM06) | 🅿️ described; no auto-test |

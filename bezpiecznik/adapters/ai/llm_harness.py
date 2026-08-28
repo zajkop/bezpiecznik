@@ -248,6 +248,29 @@ class LLMHarness:
             if det.is_refusal(reply):
                 refusals += 1
 
+        # --- markdown-image data exfiltration (LLM02/LLM05): the injection coaxes the model
+        # into embedding protected data inside an OUTBOUND URL (markdown image/link/autolink)
+        # to an attacker host. A client that renders the reply auto-fetches image URLs, so the
+        # secret leaves the trust boundary with zero clicks (EchoLeak / Notion-AI / Continue
+        # class). Distinct from the plaintext-leak detectors: the signal is an exfil SINK in the
+        # output, not the secret appearing in prose.
+        for payload in _load_json(self.payloads_dir, "markdown-exfil.json", ai_limit):
+            tested += 1
+            reply = self.chat.send(payload)
+            self.log.action(target.llm_endpoint or target.url, self.name,
+                            f"md-exfil probe: {payload[:50]}")
+            sink = det.markdown_exfil(reply, self.known_canary, sent=payload)
+            if sink:
+                findings.append(self._finding(
+                    "Data exfiltration via rendered markdown — the model embedded protected "
+                    f"content in an outbound URL a client auto-fetches on render ({sink[:120]})",
+                    Severity.CRITICAL, "LLM02:2025 Sensitive Information Disclosure", "CWE-200",
+                    payload, reply, target))
+                self.log.finding("Markdown-image data exfiltration", "critical")
+                break
+            if det.is_refusal(reply):
+                refusals += 1
+
         self.log.info(f"Single-turn harness: {tested} attempts, {refusals} refusals, "
                       f"{len(findings)} confirmations")
         return findings
