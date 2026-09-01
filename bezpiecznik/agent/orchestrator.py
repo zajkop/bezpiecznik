@@ -102,7 +102,10 @@ class Orchestrator:
                 host_paths=mcfg.get("host_paths", ["/"]),
                 graphql_paths=mcfg.get("graphql_paths", ["/graphql"]),
                 merge_paths=mcfg.get("merge_paths"),
-                race=mcfg.get("race"))
+                race=mcfg.get("race"),
+                ai_inject_paths=mcfg.get(
+                    "ai_inject_paths",
+                    sorted({p for p, _ in seeds}) or ["/"]))
 
         # --- AI ---
         if ai:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import re
 
 import httpx
 
@@ -15,6 +16,73 @@ from ...core.models import Evidence, Finding, Severity, Target
 from ...core.scope import ActionClass, ScopeGuard
 
 EVIL_ORIGIN = "https://evil.example"
+
+# --- Hidden indirect-prompt-injection in served content (LLM01, in-the-wild) ---
+# A page can carry instructions aimed not at the human reader but at any LLM agent,
+# crawler, RAG pipeline or "summarize this page" assistant that later consumes it.
+# The instructions are CONCEALED from a human (HTML comment, CSS-hidden element, or
+# zero-width/invisible Unicode) so only the machine reads them — the technique Unit 42
+# documented being used in the wild against AI agents in 2026. We fire only when an
+# AI-directed imperative co-occurs with a concealment mechanism, keeping false
+# positives low (plain visible text that merely mentions "ignore instructions" does
+# NOT trigger).
+
+# Invisible / zero-width code points used to smuggle text past a human's eyes.
+_INVISIBLE = [
+    0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x180E, 0x200E, 0x200F,
+    0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2061, 0x2062, 0x2063, 0x2064,
+    0x2066, 0x2067, 0x2068, 0x2069,
+]
+_ZW_TABLE = {c: None for c in _INVISIBLE}
+_ZW_TABLE.update({c: None for c in range(0xE0000, 0xE0080)})  # Unicode Tags block
+
+# Imperative phrases directed at an AI/assistant/model (not ordinary prose).
+_INSTRUCTION_SIGNS = [
+    re.compile(r"ignore\s+(?:all\s+|the\s+|any\s+)?(?:previous|prior|above|earlier|preceding)\s+"
+               r"(?:instruction|prompt|message|context|rule)", re.I),
+    re.compile(r"disregard\s+(?:all\s+|the\s+|any\s+)?(?:previous|prior|above|earlier|system|safety)", re.I),
+    re.compile(r"\byou\s+are\s+now\b", re.I),
+    re.compile(r"\bnew\s+instructions?\s*:", re.I),
+    re.compile(r"\bsystem\s+prompt\b", re.I),
+    re.compile(r"\b(?:reveal|print|repeat|output|leak|exfiltrate|send|forward)\b[^.\n<]{0,60}"
+               r"\b(?:system\s+prompt|prompt|instructions?|api[\s_-]?key|password|secret|token|credential)", re.I),
+    re.compile(r"\bdo\s+anything\s+now\b|\bDAN\s+mode\b", re.I),
+    re.compile(r"\b(?:developer|god|jailbreak)\s+mode\b", re.I),
+    re.compile(r"\b(?:assistant|system|ai)\s*:\s*(?:ignore|reveal|print|output|forward|send|say|reply|"
+               r"execute|run|delete|email|browse|fetch)", re.I),
+    re.compile(r"\boverride\b[^.\n<]{0,40}\b(?:instruction|policy|guardrail|restriction|filter)", re.I),
+    re.compile(r"\b(?:reply|respond|answer|say|output)\b[^.\n<]{0,30}\bonly\s+with\b", re.I),
+]
+
+_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
+# Text inside an element concealed via a hidden attribute or inline CSS.
+_HIDDEN_ELEM = re.compile(
+    r"<([a-zA-Z][\w-]*)\b[^>]*?"
+    r"(?:\bhidden\b|aria-hidden\s*=\s*[\"']?\s*true"
+    r"|display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?![.\d])"
+    r"|font-size\s*:\s*0(?![.\d])|(?:left|top|text-indent|margin-left)\s*:\s*-\s*\d{3,})"
+    r"[^>]*>(.*?)</\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _match_instruction(text: str) -> str | None:
+    """Return the matched snippet if the text carries an AI-directed instruction."""
+    for pat in _INSTRUCTION_SIGNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _snippet(text: str, needle: str) -> str:
+    """A short, single-line context window around the matched instruction."""
+    flat = re.sub(r"\s+", " ", text).strip()
+    i = flat.lower().find(needle.lower())
+    if i < 0:
+        return flat[:120]
+    start = max(0, i - 20)
+    return flat[start:start + 140]
 
 
 class ModernScanner:
@@ -27,7 +95,8 @@ class ModernScanner:
 
     def scan(self, target: Target, *, cors_paths: list[str] | None = None,
              host_paths: list[str] | None = None, graphql_paths: list[str] | None = None,
-             merge_paths: list[str] | None = None, race: dict | None = None) -> list[Finding]:
+             merge_paths: list[str] | None = None, race: dict | None = None,
+             ai_inject_paths: list[str] | None = None) -> list[Finding]:
         base = target.url.rstrip("/")
         self.guard.authorize(base, ActionClass.ACTIVE)
         findings: list[Finding] = []
@@ -39,6 +108,8 @@ class ModernScanner:
             findings += self._graphql(base, p)
         for p in (merge_paths or []):
             findings += self._prototype_pollution(base, p)
+        for p in (ai_inject_paths if ai_inject_paths is not None else ["/"]):
+            findings += self._hidden_ai_injection(base, p)
         if race:
             findings += self._race(base, race)
         return findings
@@ -106,6 +177,64 @@ class ModernScanner:
                 recommendation="Disable introspection in production; enforce authz per field; rate-limit.",
                 reproduction=f"curl -X POST {base}{path} -d '{{\"query\":\"{{__schema{{types{{name}}}}}}\"}}'",
                 evidence=Evidence(payload=json.dumps(q), response=r.text[:250])))
+        return out
+
+    def _hidden_ai_injection(self, base: str, path: str) -> list[Finding]:
+        """Concealed indirect prompt injection served in the page content (LLM01).
+
+        Flags text that carries an AI-directed instruction AND is hidden from a human
+        reader (HTML comment, CSS/attribute-hidden element, or zero-width Unicode) — a
+        payload aimed at any downstream LLM agent/crawler/RAG that consumes the page.
+        """
+        out: list[Finding] = []
+        r = self.http.get(f"{base}{path}")
+        ctype = (r.header("Content-Type") or "").lower()
+        html = r.text or ""
+        # Only meaningful for text/HTML responses.
+        if "html" not in ctype and "text" not in ctype and not html.lstrip().startswith("<"):
+            return out
+        hits: list[tuple[str, str]] = []
+        # 1) instruction concealed inside an HTML comment
+        for m in _COMMENT.finditer(html):
+            sign = _match_instruction(m.group(1))
+            if sign:
+                hits.append(("HTML comment", _snippet(m.group(1), sign)))
+                break
+        # 2) instruction concealed inside a CSS/attribute-hidden element
+        for m in _HIDDEN_ELEM.finditer(html):
+            sign = _match_instruction(m.group(2))
+            if sign:
+                hits.append(("CSS/attribute-hidden element", _snippet(m.group(2), sign)))
+                break
+        # 3) instruction smuggled with zero-width / invisible Unicode: it only surfaces
+        #    once the invisible characters are stripped (and is not already visible raw).
+        deobf = html.translate(_ZW_TABLE)
+        if deobf != html and not _match_instruction(html):
+            sign = _match_instruction(deobf)
+            if sign:
+                hits.append(("invisible Unicode (zero-width)", _snippet(deobf, sign)))
+        if not hits:
+            return out
+        techniques = ", ".join(t for t, _ in hits)
+        example = hits[0][1]
+        self.log.action(base, self.name, f"Hidden AI-injection scan {path}")
+        self._report(out, Finding(
+            title=f"Indirect prompt injection hidden in page content at {path}",
+            severity=Severity.HIGH, owasp="LLM01:2025 Prompt Injection", cwe="CWE-1427",
+            target=f"{base}{path}", component=path, source_tool=self.name,
+            description=("The page serves an AI-directed instruction concealed from a human reader "
+                         f"({techniques}). A downstream LLM agent, crawler, RAG pipeline or "
+                         "'summarize this page' assistant that ingests the content will read and may "
+                         "obey it — classic indirect prompt injection served by the site itself "
+                         "(e.g. via unsanitized user-generated content)."),
+            impact="Hijacks any AI agent consuming the page: data exfiltration, tool abuse, "
+                   "spoofed answers, or actions taken on the victim's behalf — with zero human clicks.",
+            recommendation="Sanitize/neutralize user-generated and third-party content before it can "
+                           "reach an LLM context; strip zero-width Unicode and hidden/comment text; "
+                           "treat retrieved page content as untrusted data, never as instructions.",
+            reproduction=f"curl -s {base}{path} | grep -aiE 'ignore .*instruction|system prompt|you are now'  "
+                         f"# instruction is hidden ({techniques})",
+            evidence=Evidence(payload=f"hidden instruction ({techniques})", response=example[:250])))
         return out
 
     def _prototype_pollution(self, base: str, path: str) -> list[Finding]:

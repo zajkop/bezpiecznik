@@ -318,6 +318,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | **GraphQL** | ✅ | introspection enabled / schema disclosure |
 | **Prototype Pollution** | ✅ | server-side `__proto__` merge effect |
 | **Race Condition** | ✅ | concurrent burst bypasses a single-use limit |
+| **Hidden indirect prompt injection in served content** | ✅ | AI-directed instruction concealed in a page (HTML comment / CSS-hidden element / off-screen / zero-width Unicode) that hijacks a downstream LLM agent/crawler/RAG consuming it — Unit 42 in-the-wild class; fires only when instruction + concealment co-occur (LLM01:2025 / CWE-1427) |
 | Verbose error / stack-trace disclosure | ✅ | malformed input leaks a traceback/debug page (Python/Java/.NET/PHP/Node/Ruby/Go); baseline-gated, distinct from SQL errors (CWE-209) |
 | Missing headers / misconfig | ✅ | CSP/XFO/XCTO + server version |
 | Business Logic (from a description) | ✅ | `run_business_logic_test` — planner+judge LLM (double-booking, price/quantity manipulation, coupons) |
@@ -331,7 +332,7 @@ Legend: ✅ automated detection · 🅿️ we have payloads, no auto-detection �
 | System prompt leakage (LLM07) | ✅ + **309-prompt extraction set** |
 | Sensitive info disclosure (LLM02) | ✅ curated + **`exfil-fuzz.json` (36)** PII/secret/cross-tenant/training-leak phrasings + **rendered-markdown exfiltration** (secret embedded in an outbound image/link/autolink URL a client auto-fetches on render — EchoLeak class, `markdown-exfil.json`) |
 | Improper output handling (LLM05) | ✅ unsafe-output detector + **`output-handling-fuzz.json` (112)** dangerous-payload × phrasing |
-| Indirect injection (LLM01) | ✅ instruction-in-data → execution detection + **`indirect-fuzz.json` (60)** wrapper × goal |
+| Indirect injection (LLM01) | ✅ instruction-in-data → execution detection + **`indirect-fuzz.json` (60)** wrapper × goal; plus the **web-side detector** that flags a *served* page carrying an instruction concealed from humans (comment / CSS-hidden / zero-width Unicode) aimed at any LLM agent that ingests it (see Web/API matrix) |
 | Excessive agency (LLM06) | 🅿️ described; no auto-test |
 | Unbounded consumption (LLM10) | ❌ (destructive — behind opt-in) |
 | Vector/RAG (LLM08), poisoning (LLM04), supply chain (LLM03) | ❌ |
