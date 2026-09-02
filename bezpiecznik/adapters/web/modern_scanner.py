@@ -75,6 +75,44 @@ def _match_instruction(text: str) -> str | None:
     return None
 
 
+# --- Forged chat-template control tokens in served content (ChatInject, LLM01) ---
+# Distinct from the concealment-based injection above: here the attack IS the
+# presence of a model's chat-template role delimiters inside data that a downstream
+# agent naively concatenates into its prompt template. The template renderer then
+# treats the forged "<|im_start|>system" / "[INST]" / "<|start_header_id|>assistant"
+# markers as real turn boundaries, letting attacker-controlled page/tool content
+# escape the data sandbox and issue system/assistant turns (arXiv:2509.22830,
+# "ChatInject"). These special-token strings essentially never occur in legitimate
+# web content, so their presence is a strong, low-false-positive signal.
+
+# High-specificity delimiters — a bare occurrence is enough to flag.
+_CHAT_TEMPLATE_TOKENS = [
+    "<|im_start|>", "<|im_end|>",                       # ChatML (OpenAI/Qwen)
+    "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>",  # Llama 3
+    "<<SYS>>", "<</SYS>>",                               # Llama 2
+    "<start_of_turn>", "<end_of_turn>",                 # Gemma
+    "<|system|>", "<|user|>", "<|assistant|>", "<|end|>",  # Phi / generic
+]
+# Softer markers (real words in normal prose) — flagged only when they introduce a
+# forged privileged role, i.e. paired with a system/assistant role switch nearby.
+_SOFT_ROLE_SWITCH = re.compile(
+    r"(?:\[INST\]|###\s*Instruction\s*:|###\s*System\s*:|<\|prompter\|>)"
+    r"[\s\S]{0,80}?"
+    r"(?:###\s*Response\s*:|\bassistant\b|\bsystem\b|\[/INST\])",
+    re.IGNORECASE)
+
+
+def _match_chat_template(text: str) -> str | None:
+    """Return a matched forged chat-template delimiter, if present."""
+    for tok in _CHAT_TEMPLATE_TOKENS:
+        if tok in text:
+            return tok
+    m = _SOFT_ROLE_SWITCH.search(text)
+    if m:
+        return re.sub(r"\s+", " ", m.group(0))[:60]
+    return None
+
+
 def _snippet(text: str, needle: str) -> str:
     """A short, single-line context window around the matched instruction."""
     flat = re.sub(r"\s+", " ", text).strip()
@@ -193,6 +231,7 @@ class ModernScanner:
         # Only meaningful for text/HTML responses.
         if "html" not in ctype and "text" not in ctype and not html.lstrip().startswith("<"):
             return out
+        out += self._chat_template_injection(base, path, html)
         hits: list[tuple[str, str]] = []
         # 1) instruction concealed inside an HTML comment
         for m in _COMMENT.finditer(html):
@@ -235,6 +274,42 @@ class ModernScanner:
             reproduction=f"curl -s {base}{path} | grep -aiE 'ignore .*instruction|system prompt|you are now'  "
                          f"# instruction is hidden ({techniques})",
             evidence=Evidence(payload=f"hidden instruction ({techniques})", response=example[:250])))
+        return out
+
+    def _chat_template_injection(self, base: str, path: str, html: str) -> list[Finding]:
+        """Forged chat-template control tokens served in the page content (ChatInject, LLM01).
+
+        Flags served content that carries a model's chat-template role delimiters
+        (ChatML/Llama/Gemma/etc.). A downstream agent that concatenates this content
+        into its prompt template has its turn boundaries forged by the data, letting
+        the content issue system/assistant turns — escaping the data sandbox.
+        """
+        out: list[Finding] = []
+        sign = _match_chat_template(html)
+        if not sign:
+            return out
+        self.log.action(base, self.name, f"Chat-template injection scan {path}")
+        self._report(out, Finding(
+            title=f"Forged chat-template control tokens in page content at {path}",
+            severity=Severity.HIGH, owasp="LLM01:2025 Prompt Injection", cwe="CWE-1427",
+            target=f"{base}{path}", component=path, source_tool=self.name,
+            description=("The page serves a model's chat-template role delimiter "
+                         f"({sign!r}) inside its content. A downstream LLM agent, RAG "
+                         "pipeline or tool that concatenates this content into its prompt "
+                         "template will have the forged marker parsed as a real turn "
+                         "boundary, letting attacker-controlled data open a spoofed "
+                         "system/assistant turn — the ChatInject class (arXiv:2509.22830)."),
+            impact="Attacker-controlled content escapes the data sandbox and injects "
+                   "system/assistant instructions into any agent that ingests the page: "
+                   "guardrail bypass, tool abuse, data exfiltration, spoofed answers.",
+            recommendation="Strip/escape chat-template special tokens from retrieved and "
+                           "user-generated content before it enters an LLM prompt; keep "
+                           "untrusted data in a clearly delimited user turn, never rendered "
+                           "as template control tokens.",
+            reproduction=f"curl -s {base}{path} | grep -aoE '<\\|im_start\\|>|\\[INST\\]|<\\|start_header_id\\|>'  "
+                         f"# forged delimiter {sign!r} in the served content",
+            evidence=Evidence(payload=f"chat-template delimiter {sign!r}",
+                              response=_snippet(html, sign)[:250])))
         return out
 
     def _prototype_pollution(self, base: str, path: str) -> list[Finding]:
