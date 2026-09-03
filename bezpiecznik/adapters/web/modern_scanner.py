@@ -123,6 +123,119 @@ def _snippet(text: str, needle: str) -> str:
     return flat[start:start + 140]
 
 
+# --- MCP tool poisoning in a served tool manifest (MCP03:2025, LLM01) ---
+# A Model Context Protocol server advertises its tools via `tools/list`; each tool
+# carries a free-text `description` and per-parameter descriptions that are fed
+# verbatim into the agent's context. Tool poisoning plants adversarial instructions
+# inside those descriptions (or parameter schemas) — hijacking the agent even when
+# the poisoned tool is never called, and often concealing the directive from a human
+# who only sees a short summary. Beyond the generic AI-directed imperatives and forged
+# chat-template tokens we already match, tool poisoning has its own tell-tale side
+# channels: the Invariant Labs `<IMPORTANT>` wrapper, "do not tell the user"
+# secrecy directives, "before using this tool …" preambles, and instructions to read
+# or exfiltrate sensitive local files (SSH keys, .env, ~/.cursor/mcp.json).
+# Sources: OWASP MCP Top 10 MCP03:2025 (Tool Poisoning); Invariant Labs, "MCP Security
+# Notification: Tool Poisoning Attacks"; MCPTox benchmark (arXiv:2508.14925).
+_MCP_SIDECHANNEL = re.compile(
+    r"<\s*IMPORTANT\s*>"
+    r"|(?:do\s+not|don't|never)\s+(?:tell|mention|inform|notify|reveal\s+to|show|alert)\s+"
+    r"(?:the\s+|this\s+)?(?:user|human|operator|caller)"
+    r"|(?:without|do\s+not|don't)\s+(?:telling|informing|notifying|alerting)\s+"
+    r"(?:the\s+)?(?:user|human)"
+    r"|before\s+(?:using|calling|invoking|you\s+(?:use|call|invoke))\s+this\s+tool"
+    r"|(?:read|cat|open|load|exfiltrate|send|forward|leak|upload|post)\b[^.\n]{0,50}?"
+    r"(?:~/\.ssh|/etc/passwd|\.env\b|\.cursor/mcp\.json|mcp\.json|id_rsa"
+    r"|api[\s_-]?key|secret|credential|access[\s_-]?token)",
+    re.I,
+)
+
+
+def _find_tools(o: object) -> list[dict]:
+    """Locate a list of tool definition dicts inside a parsed MCP/JSON response."""
+    if isinstance(o, dict):
+        for key in ("tools",):
+            if isinstance(o.get(key), list):
+                return [t for t in o[key] if isinstance(t, dict)]
+        res = o.get("result")
+        if isinstance(res, dict) and isinstance(res.get("tools"), list):
+            return [t for t in res["tools"] if isinstance(t, dict)]
+    if isinstance(o, list):
+        return [t for t in o if isinstance(t, dict) and ("description" in t or "name" in t)]
+    return []
+
+
+def _parse_tools(text: str) -> list[dict]:
+    """Parse tool definitions from a direct JSON body or an SSE `data:` stream."""
+    if not text:
+        return []
+    objs: list[object] = []
+    stripped = text.strip()
+    try:
+        objs.append(json.loads(stripped))
+    except (ValueError, TypeError):
+        for line in stripped.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                try:
+                    objs.append(json.loads(line[5:].strip()))
+                except (ValueError, TypeError):
+                    pass
+    tools: list[dict] = []
+    for o in objs:
+        tools.extend(_find_tools(o))
+    return tools
+
+
+def _walk_descriptions(node: object) -> list[str]:
+    """Every `description` string value reachable inside a JSON-schema node."""
+    out: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "description" and isinstance(v, str):
+                out.append(v)
+            else:
+                out.extend(_walk_descriptions(v))
+    elif isinstance(node, list):
+        for it in node:
+            out.extend(_walk_descriptions(it))
+    return out
+
+
+def _collect_descriptions(tool: dict) -> list[tuple[str, str]]:
+    """(field, text) pairs an agent would ingest: name, description, param descriptions."""
+    parts: list[tuple[str, str]] = []
+    name = tool.get("name")
+    if isinstance(name, str):
+        parts.append(("name", name))
+    desc = tool.get("description")
+    if isinstance(desc, str):
+        parts.append(("description", desc))
+    schema = tool.get("inputSchema") or tool.get("input_schema") or tool.get("parameters")
+    for d in _walk_descriptions(schema):
+        parts.append(("parameter", d))
+    return parts
+
+
+def _mcp_signal(text: str) -> tuple[str, str] | None:
+    """Classify a poisoning signal in one description, or None. Order = specificity."""
+    deobf = text.translate(_ZW_TABLE)
+    if deobf != text and not (_match_instruction(text) or _MCP_SIDECHANNEL.search(text)):
+        m = _MCP_SIDECHANNEL.search(deobf)
+        sign = _match_instruction(deobf) or (m.group(0) if m else None)
+        if sign:
+            return ("zero-width Unicode concealment", sign)
+    sign = _match_instruction(text)
+    if sign:
+        return ("AI-directed instruction", sign)
+    m = _MCP_SIDECHANNEL.search(text)
+    if m:
+        return ("hidden side-channel directive", m.group(0))
+    ct = _match_chat_template(text)
+    if ct:
+        return ("forged chat-template token", ct)
+    return None
+
+
 class ModernScanner:
     name = "modern-scanner (native)"
 
@@ -134,7 +247,8 @@ class ModernScanner:
     def scan(self, target: Target, *, cors_paths: list[str] | None = None,
              host_paths: list[str] | None = None, graphql_paths: list[str] | None = None,
              merge_paths: list[str] | None = None, race: dict | None = None,
-             ai_inject_paths: list[str] | None = None) -> list[Finding]:
+             ai_inject_paths: list[str] | None = None,
+             mcp_paths: list[str] | None = None) -> list[Finding]:
         base = target.url.rstrip("/")
         self.guard.authorize(base, ActionClass.ACTIVE)
         findings: list[Finding] = []
@@ -148,6 +262,8 @@ class ModernScanner:
             findings += self._prototype_pollution(base, p)
         for p in (ai_inject_paths if ai_inject_paths is not None else ["/"]):
             findings += self._hidden_ai_injection(base, p)
+        for p in (mcp_paths if mcp_paths is not None else ["/mcp", "/messages", "/sse"]):
+            findings += self._mcp_tool_poisoning(base, p)
         if race:
             findings += self._race(base, race)
         return findings
@@ -310,6 +426,69 @@ class ModernScanner:
                          f"# forged delimiter {sign!r} in the served content",
             evidence=Evidence(payload=f"chat-template delimiter {sign!r}",
                               response=_snippet(html, sign)[:250])))
+        return out
+
+    def _mcp_tool_poisoning(self, base: str, path: str) -> list[Finding]:
+        """MCP tool poisoning in a served tool manifest (MCP03:2025 / LLM01).
+
+        Fetches an MCP `tools/list` (or a static tool manifest) and flags any tool
+        whose description or parameter schema carries adversarial instructions — an
+        AI-directed imperative, a forged chat-template token, a tool-poisoning side
+        channel (`<IMPORTANT>` wrapper, "do not tell the user", "before using this
+        tool", read/exfiltrate a secret file), or one of those smuggled with
+        zero-width Unicode. These descriptions are fed verbatim into a consuming
+        agent's context, so a poisoned tool hijacks the agent even if never called.
+        """
+        out: list[Finding] = []
+        rpc = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        r = self.http.post(f"{base}{path}",
+                           headers={"Content-Type": "application/json",
+                                    "Accept": "application/json, text/event-stream"},
+                           content=json.dumps(rpc))
+        tools = _parse_tools(r.text)
+        # Static manifests are GET-only; probe GET only for manifest-shaped paths so
+        # we never hang a GET on a live SSE stream.
+        if not tools and (path.endswith(".json") or path.endswith("/tools")
+                          or "manifest" in path or "well-known" in path):
+            tools = _parse_tools(self.http.get(f"{base}{path}").text)
+        if not tools:
+            return out
+        poisoned: list[tuple[str, str, str, str]] = []
+        for tool in tools:
+            tname = tool.get("name") if isinstance(tool.get("name"), str) else "<tool>"
+            for field, text in _collect_descriptions(tool):
+                sig = _mcp_signal(text)
+                if sig:
+                    poisoned.append((tname, field, sig[0], _snippet(text.translate(_ZW_TABLE), sig[1])))
+                    break
+        if not poisoned:
+            return out
+        self.log.action(base, self.name, f"MCP tool-poisoning scan {path}")
+        names = ", ".join(sorted({p[0] for p in poisoned}))
+        techniques = ", ".join(sorted({p[2] for p in poisoned}))
+        tool0, field0, _, example = poisoned[0]
+        self._report(out, Finding(
+            title=f"MCP tool poisoning in the tool manifest at {path}",
+            severity=Severity.HIGH, owasp="LLM01:2025 Prompt Injection", cwe="CWE-1427",
+            target=f"{base}{path}", component=path, source_tool=self.name,
+            description=(f"The MCP server at {path} advertises tool(s) whose {field0} carries "
+                         f"adversarial instructions ({techniques}). Poisoned tool(s): {names}. "
+                         "MCP tool descriptions and parameter schemas are fed verbatim into a "
+                         "consuming agent's context, so the injected directive hijacks the agent "
+                         "the moment the tool list is loaded — even if the poisoned tool is never "
+                         "invoked (OWASP MCP03:2025 Tool Poisoning)."),
+            impact="Any agent that connects to this MCP server can be silently redirected: secret "
+                   "exfiltration (SSH keys, .env, tokens), unauthorized tool calls, spoofed answers, "
+                   "or actions taken on the user's behalf — with the directive hidden from the human.",
+            recommendation="Treat tool descriptions and parameter schemas as untrusted data; pin and "
+                           "review tool definitions (hash on change); strip control tokens and hidden "
+                           "directives; surface the full untruncated description to the user before "
+                           "approval; isolate/allowlist MCP servers.",
+            reproduction=(f"curl -s -X POST {base}{path} -H 'Content-Type: application/json' "
+                          "-d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}'  "
+                          f"# inspect the '{tool0}' tool {field0}"),
+            evidence=Evidence(payload=f"poisoned {field0} of tool '{tool0}' ({techniques})",
+                              response=example[:250])))
         return out
 
     def _prototype_pollution(self, base: str, path: str) -> list[Finding]:

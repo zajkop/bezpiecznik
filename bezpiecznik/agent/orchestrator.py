@@ -105,7 +105,8 @@ class Orchestrator:
                 race=mcfg.get("race"),
                 ai_inject_paths=mcfg.get(
                     "ai_inject_paths",
-                    sorted({p for p, _ in seeds}) or ["/"]))
+                    sorted({p for p, _ in seeds}) or ["/"]),
+                mcp_paths=mcfg.get("mcp_paths", ["/mcp", "/messages", "/sse"]))
 
         # --- AI ---
         if ai:
