@@ -150,6 +150,36 @@ _MCP_SIDECHANNEL = re.compile(
 )
 
 
+# --- Poisoned agent-instruction / "skill" files served on the site (LLM01) ---
+# Coding agents and web-fetching assistants ingest well-known instruction files —
+# AGENTS.md, CLAUDE.md, .cursorrules, .github/copilot-instructions.md, GEMINI.md,
+# .windsurfrules — VERBATIM as standing instructions. When such a file is served from
+# an attacker-influenced surface (a public repo, a docs site, user-supplied content an
+# agent clones/fetches), a poisoned file silently rewrites the agent's behaviour: the
+# "Skill-Inject" / skill-file attack class (arXiv:2602.20156) and CrowdStrike's
+# "Unwitting User Context-Data Injection" (IM0018). Unlike the concealed-in-HTML case,
+# the payload is usually plainly readable in the file — so we do NOT fire on the mere
+# presence of an AI-directed instruction (that is the file's legitimate purpose).
+# We fire only on a MALICIOUS tell: a secrecy/exfiltration side-channel directive
+# (reusing _MCP_SIDECHANNEL), a forged chat-template control token, or any directive
+# smuggled with zero-width Unicode. This keeps a benign AGENTS.md/CLAUDE.md silent.
+def _agent_file_signal(text: str) -> tuple[str, str] | None:
+    """Classify a poisoning signal in an agent-instruction file, or None."""
+    deobf = text.translate(_ZW_TABLE)
+    if deobf != text and not (_MCP_SIDECHANNEL.search(text) or _match_chat_template(text)):
+        m = _MCP_SIDECHANNEL.search(deobf)
+        sign = (m.group(0) if m else None) or _match_chat_template(deobf) or _match_instruction(deobf)
+        if sign:
+            return ("zero-width Unicode concealment", sign)
+    m = _MCP_SIDECHANNEL.search(text)
+    if m:
+        return ("hidden side-channel directive", m.group(0))
+    ct = _match_chat_template(text)
+    if ct:
+        return ("forged chat-template token", ct)
+    return None
+
+
 def _find_tools(o: object) -> list[dict]:
     """Locate a list of tool definition dicts inside a parsed MCP/JSON response."""
     if isinstance(o, dict):
@@ -248,7 +278,8 @@ class ModernScanner:
              host_paths: list[str] | None = None, graphql_paths: list[str] | None = None,
              merge_paths: list[str] | None = None, race: dict | None = None,
              ai_inject_paths: list[str] | None = None,
-             mcp_paths: list[str] | None = None) -> list[Finding]:
+             mcp_paths: list[str] | None = None,
+             agent_file_paths: list[str] | None = None) -> list[Finding]:
         base = target.url.rstrip("/")
         self.guard.authorize(base, ActionClass.ACTIVE)
         findings: list[Finding] = []
@@ -264,6 +295,10 @@ class ModernScanner:
             findings += self._hidden_ai_injection(base, p)
         for p in (mcp_paths if mcp_paths is not None else ["/mcp", "/messages", "/sse"]):
             findings += self._mcp_tool_poisoning(base, p)
+        for p in (agent_file_paths if agent_file_paths is not None else
+                  ["/AGENTS.md", "/CLAUDE.md", "/.cursorrules",
+                   "/.github/copilot-instructions.md", "/.windsurfrules", "/GEMINI.md"]):
+            findings += self._agent_file_poisoning(base, p)
         if race:
             findings += self._race(base, race)
         return findings
@@ -489,6 +524,58 @@ class ModernScanner:
                           f"# inspect the '{tool0}' tool {field0}"),
             evidence=Evidence(payload=f"poisoned {field0} of tool '{tool0}' ({techniques})",
                               response=example[:250])))
+        return out
+
+    def _agent_file_poisoning(self, base: str, path: str) -> list[Finding]:
+        """Poisoned agent-instruction / skill file served on the site (LLM01).
+
+        Fetches a well-known agent-instruction file (AGENTS.md, CLAUDE.md,
+        .cursorrules, copilot-instructions.md, GEMINI.md, .windsurfrules) and flags it
+        when it carries a MALICIOUS directive an ingesting coding agent would obey: a
+        secrecy/exfiltration side-channel ("do not tell the user", read/exfiltrate a
+        secret file), a forged chat-template control token, or a directive smuggled
+        with zero-width Unicode. A benign file that merely instructs the agent stays
+        silent — the Skill-Inject / skill-file class (arXiv:2602.20156) and CrowdStrike
+        "Unwitting User Context-Data Injection" (IM0018).
+        """
+        out: list[Finding] = []
+        r = self.http.get(f"{base}{path}")
+        if r.status != 200:
+            return out
+        ctype = (r.header("Content-Type") or "").lower()
+        body = r.text or ""
+        # Guard against SPA/HTML 200-catch-alls: only treat as a real file if it is
+        # served as text/markdown/plain and does not look like a rendered HTML document.
+        if "html" in ctype or body.lstrip()[:1] == "<":
+            return out
+        if not any(t in ctype for t in ("text", "markdown", "octet-stream")) and ctype:
+            return out
+        sig = _agent_file_signal(body)
+        if not sig:
+            return out
+        technique, matched = sig
+        self.log.action(base, self.name, f"Agent-file poisoning scan {path}")
+        self._report(out, Finding(
+            title=f"Poisoned agent-instruction file served at {path}",
+            severity=Severity.HIGH, owasp="LLM01:2025 Prompt Injection", cwe="CWE-1427",
+            target=f"{base}{path}", component=path, source_tool=self.name,
+            description=(f"The site serves an agent-instruction/skill file ({path}) that carries an "
+                         f"adversarial directive ({technique}). Coding agents and web-fetching "
+                         "assistants (Claude Code, Cursor, Copilot, Gemini, Windsurf) ingest these "
+                         "well-known files verbatim as standing instructions, so a poisoned file "
+                         "silently rewrites the agent's behaviour the moment the file is loaded — the "
+                         "Skill-Inject / skill-file attack class (arXiv:2602.20156)."),
+            impact="Any agent that clones/fetches this content is hijacked: secret exfiltration "
+                   "(SSH keys, .env, tokens), unauthorized tool/command execution, spoofed answers, "
+                   "or actions taken on the user's behalf — often with the directive hidden from "
+                   "the human who trusts the file.",
+            recommendation="Treat third-party/user-supplied agent-instruction files as untrusted data; "
+                           "review and pin them (hash on change); strip control tokens, zero-width "
+                           "Unicode and secrecy/exfiltration directives; never auto-load instruction "
+                           "files from cloned or fetched repositories without review.",
+            reproduction=f"curl -s {base}{path}  # inspect for the adversarial directive ({technique})",
+            evidence=Evidence(payload=f"poisoned {path} ({technique})",
+                              response=_snippet(body.translate(_ZW_TABLE), matched)[:250])))
         return out
 
     def _prototype_pollution(self, base: str, path: str) -> list[Finding]:

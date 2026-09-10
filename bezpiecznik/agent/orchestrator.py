@@ -106,7 +106,11 @@ class Orchestrator:
                 ai_inject_paths=mcfg.get(
                     "ai_inject_paths",
                     sorted({p for p, _ in seeds}) or ["/"]),
-                mcp_paths=mcfg.get("mcp_paths", ["/mcp", "/messages", "/sse"]))
+                mcp_paths=mcfg.get("mcp_paths", ["/mcp", "/messages", "/sse"]),
+                agent_file_paths=mcfg.get(
+                    "agent_file_paths",
+                    ["/AGENTS.md", "/CLAUDE.md", "/.cursorrules",
+                     "/.github/copilot-instructions.md", "/.windsurfrules", "/GEMINI.md"]))
 
         # --- AI ---
         if ai:
