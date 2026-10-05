@@ -266,6 +266,81 @@ def _mcp_signal(text: str) -> tuple[str, str] | None:
     return None
 
 
+# --- Malicious git-config execution sinks served on the site (GitSpawn, 2026) ---
+# A repository's `.git/config` can carry keys git runs as an external program —
+# core.fsmonitor, core.sshCommand, core.pager, core.hooksPath, a `!`-shell alias, a
+# filter/diff driver, a non-builtin credential.helper — and several of them execute
+# with NO tool-approval prompt (core.fsmonitor fires on the next index refresh). When
+# such a config is reachable over the web (an exposed `.git/` directory) or ships inside
+# a received repo an AI coding agent opens, the sink becomes code execution outside the
+# agent's sandbox, with the developer's privileges — the "GitSpawn" class disclosed by
+# Manifold Security in Sept 2026 (8 flaws across 7 coding agents; the 2022 safe.directory
+# fix does not stop it). We parse the served config and fire only when a sink key holds an
+# actual COMMAND (not a benign boolean / built-in), keeping false positives low.
+_GIT_SECTION = re.compile(r'^\s*\[\s*([A-Za-z0-9.-]+)\s*(?:"([^"]*)")?\s*\]\s*$')
+_GIT_ENTRY = re.compile(r"^\s*([A-Za-z][\w-]*)\s*=\s*(.*?)\s*$")
+# Top-level / core.* keys git executes as a program (value is a command or path).
+_GIT_EXEC_KEYS = {
+    "core.fsmonitor", "core.sshcommand", "core.pager", "core.editor",
+    "core.askpass", "core.gitproxy", "core.hookspath", "sequence.editor",
+    "uploadpack.packobjectshook", "diff.external",
+}
+# (section, key) carrying a command inside a named subsection — [filter "x"], [diff "x"].
+_GIT_EXEC_SUBKEYS = {
+    ("filter", "clean"), ("filter", "smudge"), ("filter", "process"),
+    ("diff", "textconv"), ("diff", "command"), ("merge", "driver"),
+}
+# credential.helper values that are safe built-ins, not a spawned command.
+_GIT_SAFE_CRED = {"", "cache", "store", "osxkeychain", "manager",
+                  "manager-core", "wincred", "libsecret"}
+
+
+def _git_unquote(value: str) -> str:
+    """Strip git-config quoting and a trailing unquoted inline comment."""
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    for c in (" #", " ;", "\t#", "\t;"):
+        i = v.find(c)
+        if i != -1:
+            v = v[:i].rstrip()
+    return v
+
+
+def _git_config_sink(text: str) -> tuple[str, str] | None:
+    """First git-config key that holds an executable command, as (key, value), or None."""
+    section, sub = "", None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        ms = _GIT_SECTION.match(line)
+        if ms:
+            section = ms.group(1).lower()
+            sub = ms.group(2)
+            continue
+        me = _GIT_ENTRY.match(line)
+        if not me or not section:
+            continue
+        key = me.group(1).lower()
+        val = _git_unquote(me.group(2))
+        if not val:
+            continue
+        full = f"{section}.{key}"
+        if full == "core.fsmonitor" and val.lower() in ("true", "false"):
+            continue  # the benign built-in fsmonitor, not a spawned command
+        if full in _GIT_EXEC_KEYS:
+            return (full, val)
+        if sub is not None and (section, key) in _GIT_EXEC_SUBKEYS:
+            return (f"{section}.{sub}.{key}", val)
+        if full == "credential.helper" and val.lower() not in _GIT_SAFE_CRED and (
+                val.startswith("!") or "/" in val or " " in val):
+            return (full, val)
+        if section == "alias" and val.startswith("!"):
+            return (f"alias.{key}", val)
+    return None
+
+
 class ModernScanner:
     name = "modern-scanner (native)"
 
@@ -279,7 +354,8 @@ class ModernScanner:
              merge_paths: list[str] | None = None, race: dict | None = None,
              ai_inject_paths: list[str] | None = None,
              mcp_paths: list[str] | None = None,
-             agent_file_paths: list[str] | None = None) -> list[Finding]:
+             agent_file_paths: list[str] | None = None,
+             git_config_paths: list[str] | None = None) -> list[Finding]:
         base = target.url.rstrip("/")
         self.guard.authorize(base, ActionClass.ACTIVE)
         findings: list[Finding] = []
@@ -299,6 +375,8 @@ class ModernScanner:
                   ["/AGENTS.md", "/CLAUDE.md", "/.cursorrules",
                    "/.github/copilot-instructions.md", "/.windsurfrules", "/GEMINI.md"]):
             findings += self._agent_file_poisoning(base, p)
+        for p in (git_config_paths if git_config_paths is not None else ["/.git/config"]):
+            findings += self._git_config_rce(base, p)
         if race:
             findings += self._race(base, race)
         return findings
@@ -576,6 +654,60 @@ class ModernScanner:
             reproduction=f"curl -s {base}{path}  # inspect for the adversarial directive ({technique})",
             evidence=Evidence(payload=f"poisoned {path} ({technique})",
                               response=_snippet(body.translate(_ZW_TABLE), matched)[:250])))
+        return out
+
+    def _git_config_rce(self, base: str, path: str) -> list[Finding]:
+        """Served `.git/config` carrying a command-execution sink — the GitSpawn class.
+
+        Fetches an exposed `.git/config` and flags it when a key git runs as an external
+        program (core.fsmonitor, core.sshCommand, core.pager, core.hooksPath, a `!`-shell
+        alias, a filter/diff driver, a non-builtin credential.helper) holds an actual
+        command. Several sinks execute with NO approval prompt — core.fsmonitor fires on
+        the next index refresh — so a config served on the web or shipped inside a repo an
+        AI coding agent opens yields code execution outside the agent's sandbox with the
+        developer's privileges (Manifold Security "GitSpawn", 2026; the 2022 safe.directory
+        fix does not stop it). A config without such a sink, or one set to a benign
+        boolean / built-in, stays silent.
+        """
+        out: list[Finding] = []
+        r = self.http.get(f"{base}{path}")
+        if r.status != 200:
+            return out
+        ctype = (r.header("Content-Type") or "").lower()
+        body = r.text or ""
+        if "html" in ctype or body.lstrip()[:1] == "<":
+            return out  # SPA/HTML 200-catch-all, not a real config file
+        low = body.lower()
+        if "[core]" not in low and "repositoryformatversion" not in low and "[remote " not in low:
+            return out  # not a git config — avoid firing on an unrelated INI/text file
+        sink = _git_config_sink(body)
+        if not sink:
+            return out
+        key, val = sink
+        self.log.action(base, self.name, f"Git-config RCE scan {path}")
+        self._report(out, Finding(
+            title=f"Malicious git-config execution sink served at {path}",
+            severity=Severity.HIGH,
+            owasp="A08:2025 Software or Data Integrity Failures", cwe="CWE-94",
+            target=f"{base}{path}", component=path, source_tool=self.name,
+            description=(f"The site serves a git configuration ({path}) whose `{key}` is set to a "
+                         "command. git executes these keys as external programs — core.fsmonitor "
+                         "fires on the next index refresh with no approval prompt — so a developer or "
+                         "AI coding agent that opens this repository runs the attacker's command "
+                         "outside any sandbox, with full local privileges. This is the GitSpawn class "
+                         "(Manifold Security, 2026); the 2022 safe.directory fix does not stop it."),
+            impact="Arbitrary command execution on the machine that opens the repo: secret "
+                   "exfiltration (SSH keys, .env, tokens), persistence, or full host takeover — "
+                   "triggered by ordinary git/agent activity, before any tool-approval dialog.",
+            recommendation="Never serve the `.git/` directory over the web (block `/.git/`). Treat a "
+                           "received repo's `.git/config` as untrusted: strip core.fsmonitor, "
+                           "core.sshCommand, core.pager, core.hooksPath, filter/diff drivers, "
+                           "`!`-aliases and non-builtin credential.helper before opening it; configure "
+                           "coding agents to ignore repo-local execution sinks.",
+            reproduction=(f"curl -s {base}{path}  # inspect the served git config\n"
+                          f"# dangerous sink: {key} = {val[:120]}"),
+            evidence=Evidence(payload=f"git-config exec sink: {key}",
+                              response=f"{key} = {val}"[:250])))
         return out
 
     def _prototype_pollution(self, base: str, path: str) -> list[Finding]:

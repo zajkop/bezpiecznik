@@ -110,7 +110,8 @@ class Orchestrator:
                 agent_file_paths=mcfg.get(
                     "agent_file_paths",
                     ["/AGENTS.md", "/CLAUDE.md", "/.cursorrules",
-                     "/.github/copilot-instructions.md", "/.windsurfrules", "/GEMINI.md"]))
+                     "/.github/copilot-instructions.md", "/.windsurfrules", "/GEMINI.md"]),
+                git_config_paths=mcfg.get("git_config_paths", ["/.git/config"]))
 
         # --- AI ---
         if ai:
